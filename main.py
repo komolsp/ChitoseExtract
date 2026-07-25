@@ -61,17 +61,68 @@ def _show_config_error(message: str):
         print(message, file=sys.stderr)
 
 
+# 必须保持引用，否则句柄被回收后互斥量释放，单实例会失效。
+_single_instance_mutex = None
+
+
 def _acquire_single_instance() -> bool:
     """避免重复启动导致 log 文件争用、界面无响应。"""
+    global _single_instance_mutex
     if sys.platform != 'win32':
         return True
     import ctypes
     kernel32 = ctypes.windll.kernel32
-    kernel32.CreateMutexW(None, False, 'Local\\ChitoseExtract.v1.0.SingleInstance')
+    _single_instance_mutex = kernel32.CreateMutexW(
+        None, False, 'Local\\ChitoseExtract.v1.0.SingleInstance',
+    )
     return kernel32.GetLastError() != 183
 
 
+def _activate_existing_window() -> bool:
+    """把已运行实例的主窗口还原并尝试置前。"""
+    if sys.platform != 'win32':
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, app_paths.APP_TITLE)
+    if not hwnd:
+        matches: list[int] = []
+        EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _enum(hwnd_enum, _lparam):
+            length = user32.GetWindowTextLengthW(hwnd_enum)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd_enum, buf, length + 1)
+            title = buf.value
+            if title == app_paths.APP_TITLE or title.startswith(f'{app_paths.APP_NAME} '):
+                matches.append(int(hwnd_enum))
+            return True
+
+        # 保持回调引用，避免 EnumWindows 期间被 GC
+        enum_cb = EnumProc(_enum)
+        user32.EnumWindows(enum_cb, 0)
+        if not matches:
+            return False
+        hwnd = matches[0]
+
+    SW_RESTORE = 9
+    SW_SHOW = 5
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    else:
+        user32.ShowWindow(hwnd, SW_SHOW)
+    user32.SetForegroundWindow(hwnd)
+    user32.FlashWindow(hwnd, True)
+    return True
+
+
 def _show_already_running():
+    if _activate_existing_window():
+        return
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -79,8 +130,8 @@ def _show_already_running():
         root.withdraw()
         messagebox.showinfo(
             app_paths.APP_TITLE,
-            '程序已在运行中。\n'
-            '若看不到窗口，请在任务管理器中结束 pythonw.exe / python3.13 后重试。',
+            '程序已在运行中，但未找到可见窗口。\n'
+            '请在任务管理器中结束 pythonw.exe / python3.13 后重试。',
             parent=root,
         )
         root.destroy()
@@ -89,6 +140,9 @@ def _show_already_running():
 
 
 if __name__ == '__main__':
+    resource = None
+    pool = None
+    crashed = False
     try:
         multiprocessing.freeze_support()
         _enable_windows_dpi_awareness()
@@ -121,11 +175,23 @@ if __name__ == '__main__':
         pool = unzip_process_pool.ProcessPool(conf.max_thread, resource)
 
         gui.mainloop_ui()
-
-        resource.log_queue.put(None)
-
-        pool.shutdown()
     except Exception:
+        crashed = True
         import app_paths
         app_paths.append_startup_error_log('startup crash')
         raise
+    finally:
+        # GUI 正常关闭或异常退出时都回收后台进程。变量预先置空，
+        # 可覆盖配置读取、Manager 创建、进程池创建到一半等失败阶段。
+        if resource is not None:
+            try:
+                resource.log_queue.put(None)
+            except (EOFError, OSError):
+                pass
+        if pool is not None:
+            try:
+                pool.shutdown(wait=not crashed)
+            finally:
+                resource.shutdown()
+        elif resource is not None:
+            resource.shutdown()

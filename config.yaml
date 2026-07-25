@@ -218,7 +218,7 @@ audio_convert:
   # ↓ flac_compression — FLAC 压缩等级（0–12，默认 5）
   flac_compression: 5
   # ↓ max_workers — 转flac 并行线程数（1–32，默认 4；过高可能磁盘争用）
-  max_workers: 4
+  max_workers: 2
   # ↓ delete_source — 转换成功后是否删除源文件
   delete_source: true
   # ↓ flac_path — 自定义 flac.exe 路径；留空则使用内置 flac，再回退到系统 PATH
@@ -240,6 +240,6 @@ audio_tag:
   # ↓ force_retag — 是否强制覆盖已有标签
   force_retag: false
   # ↓ max_workers — 写入元数据并行线程数（1–32，默认 4）
-  max_workers: 4
+  max_workers: 3
   # ↓ cv_max_count — 写入 Artist 的声优数量上限，超出后追加「他」
   cv_max_count: 4

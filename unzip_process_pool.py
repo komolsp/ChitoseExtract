@@ -36,6 +36,7 @@ class ProcessResourceManager:
         self.list_events = self.manager.dict()
         self.list_status = self.manager.dict()
         self.list_cancelled = self.manager.dict()
+        self._closed = False
 
     def submit(self, list_id, func, *args, **kwargs):
         with self.lock:
@@ -59,11 +60,19 @@ class ProcessResourceManager:
             self.list_status[list_id] = {'completed': False, 'error': None}
             self.list_cancelled[list_id] = False
 
+    def shutdown(self):
+        """关闭 multiprocessing.Manager；可重复调用。"""
+        if self._closed:
+            return
+        self._closed = True
+        self.manager.shutdown()
+
 
 class ProcessPool:
     def __init__(self, max_workers: int, resource_manager: ProcessResourceManager):
         self.resource = resource_manager
         self.workers = []
+        self._closed = False
 
         self.result_processor = Process(
             target=_monitor,
@@ -91,13 +100,29 @@ class ProcessPool:
                     break
             time.sleep(0.1)
 
-    def shutdown(self):
-        self.wait_all()
-        for _ in range(len(self.workers)):
-            self.resource.task_queue.put(None)
-        for worker in self.workers:
-            worker.join()
-        self.resource.result_queue.put(None)
+    def shutdown(self, wait=True):
+        """关闭所有子进程；异常退出时 wait=False 可立即终止工作进程。"""
+        if self._closed:
+            return
+        self._closed = True
+        if wait:
+            self.wait_all()
+            for _ in range(len(self.workers)):
+                self.resource.task_queue.put(None)
+            for worker in self.workers:
+                worker.join()
+        else:
+            for worker in self.workers:
+                if worker.is_alive():
+                    worker.terminate()
+            for worker in self.workers:
+                worker.join(timeout=5)
+        if self.result_processor.is_alive():
+            self.resource.result_queue.put(None)
+            self.result_processor.join(timeout=5)
+        if self.result_processor.is_alive():
+            self.result_processor.terminate()
+            self.result_processor.join(timeout=5)
 
 
 def _monitor(result_queue, lock, list_counters, list_progress, list_events, list_status, log_queue, list_cancelled):
