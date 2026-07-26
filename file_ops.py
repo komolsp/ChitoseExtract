@@ -5,6 +5,7 @@ import shutil
 import stat
 import struct
 import sys
+import zlib
 from dataclasses import dataclass
 
 import chardet as chardet
@@ -53,6 +54,7 @@ _PURE_IMAGE_EXTENSIONS = frozenset({
 # 纯视频：默认真媒体文件；仅当检测到压缩魔数（首部或内嵌）才视为隐写套娃
 _PURE_VIDEO_EXTENSIONS = frozenset({
     '.mp4', '.mkv', '.avi', '.wmv', '.mov', '.webm',
+    '.ts', '.mts', '.m2ts',
 })
 
 # APK 与 ZIP 同为 PK 头；通过 ZIP 内典型 Android 条目区分真 APK 与改后缀压缩包
@@ -65,6 +67,7 @@ _APK_MARKER_PREFIXES = ('META-INF/', 'lib/', 'assets/', 'res/')
 # 7-Zip 需 -t# 解析的载体后缀（内嵌压缩或视频隐写）
 _COVERED_CARRIER_EXTENSIONS = frozenset({
     '.mp4', '.mkv', '.avi', '.wmv', '.mov', '.webm',
+    '.ts', '.mts', '.m2ts',
 })
 
 # 改后缀伪装 / 隐写载体：优先用 -t# 打开，避免按扩展名误判格式
@@ -158,6 +161,26 @@ def has_leading_archive_magic(file_path: str) -> bool:
     return any(header.startswith(sig) for sig, _ in _LEADING_SIGNATURE_FORMATS)
 
 
+def _is_likely_mpeg_transport_stream(file_path: str) -> bool:
+    """用连续同步包识别 MPEG-TS/M2TS，避免把码流中的随机压缩魔数当成套娃。"""
+    packet_layouts = (
+        (0, 188),   # MPEG-TS
+        (4, 192),   # M2TS：4 字节时间戳 + 188 字节 TS 包
+        (0, 204),   # 带 16 字节纠错数据的 TS
+    )
+    sample_size = max(offset + stride * 7 + 1 for offset, stride in packet_layouts)
+    try:
+        with open(file_path, 'rb') as f:
+            sample = f.read(sample_size)
+    except OSError:
+        return False
+    for offset, stride in packet_layouts:
+        positions = range(offset, offset + stride * 7, stride)
+        if all(pos < len(sample) and sample[pos] == 0x47 for pos in positions):
+            return True
+    return False
+
+
 def _is_likely_video_container(file_path: str) -> bool:
     """文件头是否为常见视频容器（MP4/MKV/AVI 等），用于与隐写套娃区分。"""
     try:
@@ -170,6 +193,8 @@ def _is_likely_video_container(file_path: str) -> bool:
     if header.startswith(b'\x1a\x45\xdf\xa3'):
         return True
     if len(header) >= 12 and header.startswith(b'RIFF') and header[8:12] == b'AVI ':
+        return True
+    if _is_likely_mpeg_transport_stream(file_path):
         return True
     return False
 
@@ -518,7 +543,7 @@ def _has_leading_archive_magic(file_path: str) -> bool:
 
 
 def _has_embedded_archive_magic(file_path: str) -> bool:
-    """在文件前若干 MB 内搜索内嵌压缩包特征（套娃 PDF/JPG 等）。"""
+    """搜索并校验内嵌压缩包头，避免把媒体码流中的随机魔数视为套娃。"""
     max_sig = max(len(sig) for sig in _EMBEDDED_ARCHIVE_SIGNATURES)
     overlap = max(max_sig - 1, 0)
     try:
@@ -532,27 +557,132 @@ def _has_embedded_archive_magic(file_path: str) -> bool:
     # 小文件若已在头部命中，由 _has_leading_archive_magic 处理
     if scan_limit <= max_sig:
         return False
+    scan_regions = [(0, scan_limit)]
+    tail_start = max(scan_limit, file_size - _EMBEDDED_SCAN_LIMIT)
+    if tail_start < file_size:
+        scan_regions.append((tail_start, file_size))
 
     try:
         with open(file_path, 'rb') as f:
-            offset = 0
-            previous_tail = b''
-            while offset < scan_limit:
-                chunk = f.read(min(_EMBEDDED_SCAN_CHUNK, scan_limit - offset))
-                if not chunk:
-                    break
-                window = previous_tail + chunk
-                for sig in _EMBEDDED_ARCHIVE_SIGNATURES:
-                    pos = window.find(sig)
-                    if pos == -1:
-                        continue
-                    absolute = offset - len(previous_tail) + pos
-                    if absolute > 0:
-                        return True
-                offset += len(chunk)
-                previous_tail = window[-overlap:] if overlap else b''
+            for region_start, region_end in scan_regions:
+                f.seek(region_start)
+                offset = region_start
+                previous_tail = b''
+                while offset < region_end:
+                    chunk = f.read(min(_EMBEDDED_SCAN_CHUNK, region_end - offset))
+                    if not chunk:
+                        break
+                    window = previous_tail + chunk
+                    for sig in _EMBEDDED_ARCHIVE_SIGNATURES:
+                        search_from = 0
+                        while True:
+                            pos = window.find(sig, search_from)
+                            if pos == -1:
+                                break
+                            absolute = offset - len(previous_tail) + pos
+                            if (
+                                absolute > 0
+                                and _is_plausible_embedded_archive_header(file_path, absolute)
+                            ):
+                                return True
+                            search_from = pos + 1
+                    offset += len(chunk)
+                    previous_tail = window[-overlap:] if overlap else b''
     except OSError:
         return False
+    return False
+
+
+def _is_plausible_embedded_archive_header(file_path: str, offset: int) -> bool:
+    """对魔数后的固定头字段做廉价校验；仅用于 offset > 0 的隐写候选。"""
+    try:
+        file_size = os.path.getsize(file_path)
+        with open(file_path, 'rb') as f:
+            f.seek(offset)
+            header = f.read(96)
+    except OSError:
+        return False
+
+    if header.startswith(b'PK\x03\x04'):
+        if len(header) < 30:
+            return False
+        version_needed = int.from_bytes(header[4:6], 'little')
+        flags = int.from_bytes(header[6:8], 'little')
+        method = int.from_bytes(header[8:10], 'little')
+        name_length = int.from_bytes(header[26:28], 'little')
+        extra_length = int.from_bytes(header[28:30], 'little')
+        known_methods = {0, 1, 6, 8, 9, 12, 14, 93, 95, 98, 99}
+        return (
+            10 <= version_needed <= 63
+            and not (flags & 0xC000)
+            and method in known_methods
+            and 0 < name_length <= 32768
+            and offset + 30 + name_length + extra_length <= file_size
+        )
+
+    if header.startswith(b'PK\x05\x06'):
+        if len(header) < 22:
+            return False
+        disk_number = int.from_bytes(header[4:6], 'little')
+        central_disk = int.from_bytes(header[6:8], 'little')
+        entries_on_disk = int.from_bytes(header[8:10], 'little')
+        total_entries = int.from_bytes(header[10:12], 'little')
+        central_size = int.from_bytes(header[12:16], 'little')
+        central_offset = int.from_bytes(header[16:20], 'little')
+        comment_length = int.from_bytes(header[20:22], 'little')
+        return (
+            disk_number == 0
+            and central_disk == 0
+            and entries_on_disk == total_entries
+            and (total_entries == 0 or central_size > 0)
+            and central_offset + central_size <= offset
+            and offset + 22 + comment_length <= file_size
+        )
+
+    # 数据描述符不是一个可独立打开的 ZIP 起点，不能单凭它认定为隐写包。
+    if header.startswith(b'PK\x07\x08'):
+        return False
+
+    if header.startswith(b'7z\xbc\xaf\x27\x1c'):
+        if len(header) < 32:
+            return False
+        expected_crc = int.from_bytes(header[8:12], 'little')
+        return (zlib.crc32(header[12:32]) & 0xFFFFFFFF) == expected_crc
+
+    if header.startswith(b'Rar!\x1a\x07\x00'):
+        return True
+    if header.startswith(b'Rar!\x1a\x07\x01\x00'):
+        return True
+    if header.startswith(b'Rar!'):
+        return False
+
+    if header.startswith(b'\x1f\x8b'):
+        # RFC 1952 头校验后再让 zlib 解析可选字段与首段 DEFLATE 数据。
+        if len(header) < 10 or header[2] != 8 or header[3] & 0xE0:
+            return False
+        try:
+            with open(file_path, 'rb') as f:
+                f.seek(offset)
+                sample = f.read(256 * 1024)
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            decoder.decompress(sample, 64 * 1024)
+            return True
+        except (OSError, zlib.error):
+            return False
+
+    if header.startswith(b'BZh'):
+        return (
+            len(header) >= 10
+            and header[3:4] in b'123456789'
+            and header[4:10] in (b'\x31\x41\x59\x26\x53\x59', b'\x17\x72\x45\x38\x50\x90')
+        )
+
+    if header.startswith(b'\xfd7zXZ\x00'):
+        if len(header) < 12:
+            return False
+        expected_crc = int.from_bytes(header[8:12], 'little')
+        return (zlib.crc32(header[6:8]) & 0xFFFFFFFF) == expected_crc
+
     return False
 
 
@@ -722,6 +852,11 @@ def probe_archive(file_path: str, *, nested: bool = False) -> ArchiveProbe:
         if _is_likely_video_container(file_path):
             if ext in {'.mp4', '.mov'}:
                 return _probe_mp4_mov_stego(file_path, nested=nested)
+            # 对真实媒体仅接受通过格式头结构校验的内嵌包；同时扫描首尾区域，
+            # 既过滤码流随机撞码，也保留追加式隐写压缩包识别。
+            if _has_embedded_archive_magic(file_path):
+                format_hint = _format_hint_for_file(file_path)
+                return ArchiveProbe(True, covered=True, format_type=format_hint)
             return ArchiveProbe(False)
         # 无视频容器头、仅改后缀：顶层仍可扫描内嵌魔数；包内素材保守跳过。
         if not nested and _has_embedded_archive_magic(file_path):
@@ -1703,4 +1838,3 @@ def clear_shell_folder_attributes(path: str):
                     os.chmod(os.path.join(root, name), stat.S_IWRITE | stat.S_IREAD)
                 except OSError:
                     pass
-
