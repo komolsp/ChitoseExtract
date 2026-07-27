@@ -275,15 +275,14 @@ class Unzipper():
         """7z l 对加密 .7z/.rar 可能误接受错密码，须再用 7z t 确认。"""
         if not encrypted:
             return True
+        ext = (zip.extension or os.path.splitext(compress_file)[1]).lower()
+        if ext == '.zip':
+            # ZIP（包括 AES/传统加密及分卷）常可在无密码时列出目录；
+            # 此处只排除空密码，不做全包 7z t。正式解压会按候选密码
+            # 依次尝试，并以 7-Zip 的退出码完成最终校验，避免整包读取两次。
+            return bool(password)
         if not file_ops.is_standard_archive_file(compress_file):
             return True
-        ext = (zip.extension or os.path.splitext(compress_file)[1]).lower()
-        if ext == '.zip' and not covered and not format_type:
-            # 纯正 .zip（非覆盖格式/非自动检测）：
-            # 传统 ZIP 2.0 加密（内容仅加密）：空密码能列目录但不代表密码正确
-            # AES 加密：7z l 需要正确密码才能列出
-            # 因此不需要跑 7z t 来确认，直接拒绝空密码即可
-            return bool(password)
         if ext in ('.7z', '.rar', '.zip'):
             ok, _msg = self.driver.test_archive(
                 compress_file=compress_file,
@@ -510,7 +509,7 @@ class Unzipper():
         return ordered
 
     def _resolve_encrypted_password(self, zip: Zip) -> bool:
-        """加密包用 7z l + 7z t 验证密码，不做局部解压试探。"""
+        """取得可用的非空密码候选；最终正确性由正式解压退出码确认。"""
         if zip.is_namelist_current():
             return bool(zip.verified_password())
         return self.load_namelist(zip)
@@ -556,6 +555,14 @@ class Unzipper():
             self.logger.info(
                 " 文件[' {} ']解压失败,密码验证未通过".format(zip.path)
             )
+            return None
+
+        if zip.covered:
+            # 隐写载体以前先局部解出探测文件，再整包解压，导致探测文件被重复
+            # 读取和写入。这里仅对已由 probe 标记为 covered 的载体改为一次
+            # 整包解压；标准 ZIP/7z/RAR、分卷仍走原有分支。
+            if self.single_threaded_unzip(zip, output_path):
+                return output_path
             return None
 
         if zip.volumes and len(zip.volumes) > 1:
@@ -615,13 +622,6 @@ class Unzipper():
                 # 单文件普通压缩包：password_collision 已解压该文件，无需再跑完整解压。
                 self._emit_unzip_progress(1, 1)
                 self.logger.info(f" 文件[' {zip.path} ']解压完成")
-            elif zip.covered:
-                # 隐写/套娃载体（mp4、pdf 内嵌等）：password_collision 仅用探测文件
-                # 验证密码，不会解出全部内容；必须再整包解压，否则源文件被删后内容丢失。
-                if not single_op:
-                    self._emit_unzip_progress(0, 1)
-                if not self.single_threaded_unzip(zip, output_path):
-                    return None
             elif not zip.compression_ratio_info["encrypted"] and \
                     (size / len(zip.file_list) > 200 or (size / len(zip.file_list) > thread_threshold_mb and zip.compression_ratio_info[
                          "compression_ratio"] > thread_compression_ratio)):  # 判断压缩文件加密、平均文件size、文件压缩率
@@ -954,6 +954,15 @@ class Unzipper():
         volumes_probe = (
             file_ops.resolve_volume_archives(path) if os.path.isfile(path) else None
         )
+        # resolve_volume_archives 可能会把经典 .zip/.z01/.z02 原地规范化为
+        # .zip.001/.002/.003。解析完成后必须立即同步当前路径，否则本轮仍拿
+        # 已不存在的 .z01 继续 probe，最终静默跳过整组分卷。
+        if volumes_probe:
+            redirected = current_path_for_drag(path)
+            if redirected:
+                path = redirected
+            elif not os.path.exists(path):
+                path = volumes_probe[0]
         # 路径是文件夹，递归扫描其中的压缩文件
         # 分卷只添加一次避免被反复添加解压
         # 路径不存在或无法识别，尝试相似路径
@@ -1019,7 +1028,9 @@ class Unzipper():
             return False
 
         # 改后缀分卷常在首卷带 PK 魔数、后续卷无魔数；须先于 probe 解析整组分卷。
-        volumes = file_ops.resolve_volume_archives(path)
+        # 复用入口处已经解析并规范化的结果；再次用重命名后的中间卷解析，
+        # 可能因重命名登记/目录遍历仍持有旧路径而暂时得不到同组文件。
+        volumes = volumes_probe or file_ops.resolve_volume_archives(path)
         if not volumes:
             from volume.resolver import VolumeResolver
             volumes = VolumeResolver.peek_volumes(path)

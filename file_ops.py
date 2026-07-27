@@ -220,6 +220,62 @@ def _archive_magic_after_ftyp_box(file_path: str) -> bool:
     return _match_signature(magic, _LEADING_ARCHIVE_SIGNATURES)
 
 
+def _archive_format_at_offset(file_path: str, offset: int) -> str | None:
+    """返回指定偏移处的压缩格式；空字符串表示已识别但需交给 7-Zip 自动判断。"""
+    try:
+        with open(file_path, 'rb') as f:
+            f.seek(offset)
+            header = f.read(max(len(sig) for sig in _LEADING_ARCHIVE_SIGNATURES))
+    except OSError:
+        return None
+    for sig, fmt in _LEADING_SIGNATURE_FORMATS:
+        if header.startswith(sig) and _is_plausible_embedded_archive_header(file_path, offset):
+            return fmt or ''
+    return None
+
+
+def _mp4_appended_archive_format(file_path: str) -> str | None:
+    """识别追加在完整 MP4/MOV 顶层 box 后的压缩包。"""
+    try:
+        file_size = os.path.getsize(file_path)
+    except OSError:
+        return None
+    try:
+        with open(file_path, 'rb') as f:
+            offset = 0
+            for _ in range(256):
+                if offset + 8 > file_size:
+                    break
+                f.seek(offset)
+                header = f.read(16)
+                if len(header) < 8:
+                    break
+                box_size = int.from_bytes(header[0:4], 'big')
+                box_type = header[4:8]
+                header_len = 8
+                if box_size == 1:
+                    if len(header) < 16:
+                        break
+                    box_size = int.from_bytes(header[8:16], 'big')
+                    header_len = 16
+                elif box_size == 0:
+                    break
+                # 首个顶层 box 必须是 MP4/MOV 的 ftyp，避免在任意文件中套用 box 解析。
+                if offset == 0 and box_type != b'ftyp':
+                    break
+                if box_size < header_len or offset + box_size > file_size:
+                    break
+                offset += box_size
+                if offset >= file_size:
+                    break
+                archive_format = _archive_format_at_offset(file_path, offset)
+                if archive_format is not None:
+                    return archive_format
+    except OSError:
+        return None
+    return None
+
+
 def _mp4_mdat_data_offset(file_path: str) -> int | None:
     """返回 mdat 媒体数据起始偏移；用于 moov+mdat 式伪装压缩包。"""
     try:
@@ -330,6 +386,13 @@ def _probe_mp4_mov_stego(file_path: str, *, nested: bool) -> ArchiveProbe | None
     if _archive_magic_after_ftyp_box(file_path):
         format_hint = _format_hint_for_file(file_path)
         return ArchiveProbe(True, covered=True, format_type=format_hint)
+    appended_format = _mp4_appended_archive_format(file_path)
+    if appended_format is not None:
+        return ArchiveProbe(
+            True,
+            covered=True,
+            format_type=appended_format or None,
+        )
     mdat_offset = _mp4_mdat_data_offset(file_path)
     if mdat_offset is not None:
         if _mp4_mdat_looks_like_video_bitstream(file_path, mdat_offset):

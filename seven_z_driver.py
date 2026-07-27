@@ -75,6 +75,16 @@ class SevenZDriver:
             raise UnzipError(str(err)) from err
         return 0, password
 
+    @staticmethod
+    def _should_use_pyzipper(compress_file: str, covered: bool) -> bool:
+        """pyzipper 仅处理单文件 WzAES ZIP；经典跨卷 ZIP 必须交给 7-Zip。"""
+        return (
+            not covered
+            and compress_file.lower().endswith('.zip')
+            and not file_ops.is_volume_zip(compress_file, readonly=True)
+            and file_ops.zip_uses_wz_aes(compress_file)
+        )
+
     def unzip(self, compress_file: str, output_path: str, password: str = '', output_file: str = None,
               jap: bool = False,
               covered: bool = False, format_type: str | None = None):
@@ -82,8 +92,7 @@ class SevenZDriver:
             raise UnzipError('压缩文件未设置')
         if not output_path:
             raise UnzipError('输出路径未设置')
-        if (not covered and compress_file.lower().endswith('.zip')
-                and file_ops.zip_uses_wz_aes(compress_file)):
+        if self._should_use_pyzipper(compress_file, covered):
             return self._unzip_wz_aes_zip(
                 compress_file, output_path, password, output_file,
             )
@@ -168,8 +177,7 @@ class SevenZDriver:
     def test_archive(self, compress_file: str, password: str = '', jap: bool = False,
                      covered: bool = False, format_type: str | None = None) -> tuple[bool, str]:
         """运行 7z t 校验压缩包结构/完整性（比 7z l 更严格）。"""
-        if (not covered and compress_file.lower().endswith('.zip')
-                and file_ops.zip_uses_wz_aes(compress_file)):
+        if self._should_use_pyzipper(compress_file, covered):
             ok, msg = zip_wz_aes.test_password(compress_file, password)
             return ok, msg
         cmd = [self.location_path, 't', '-p{}'.format(password), compress_file]

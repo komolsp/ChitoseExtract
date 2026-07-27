@@ -232,6 +232,60 @@ def _scan_inner_archives_in_work_root(
     return inner_list
 
 
+def _snapshot_scan_tree(root: str | None) -> dict[str, tuple[int, int]]:
+    """轻量记录文件树；只保存文件尺寸和修改时间，不读取文件内容。"""
+    if not root or not os.path.isdir(root):
+        return {}
+    snapshot: dict[str, tuple[int, int]] = {}
+    try:
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                snapshot[os.path.normcase(os.path.normpath(path))] = (
+                    stat.st_size, stat.st_mtime_ns,
+                )
+    except OSError:
+        return {}
+    return snapshot
+
+
+def _incremental_scan_roots(
+    root: str | None,
+    before: dict[str, tuple[int, int]] | None,
+) -> list[str] | None:
+    """返回本轮新增/替换内容的最小扫描根；None 表示必须回退全量扫描。"""
+    if not root or not os.path.isdir(root) or before is None:
+        return None
+    root = os.path.normpath(root)
+    changed: list[str] = []
+    try:
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                key = os.path.normcase(os.path.normpath(path))
+                if before.get(key) != (stat.st_size, stat.st_mtime_ns):
+                    changed.append(path)
+    except OSError:
+        return None
+
+    # 成功完成快照比较后，即使没有新增文件，空列表也是可信结果。
+    roots: dict[str, str] = {}
+    for path in changed:
+        rel = os.path.relpath(path, root)
+        first = rel.split(os.sep, 1)[0]
+        candidate = os.path.join(root, first)
+        roots.setdefault(os.path.normcase(candidate), candidate)
+    return list(roots.values())
+
+
 def _normalize_nested_scan_root(
     path: str | None,
     parent_zip: Zip | None = None,
@@ -1508,7 +1562,13 @@ def _requeue_stuck_outer_timelines():
             _enqueue_nested_archives(timeline, work_root, parent_zip)
 
 
-def _enqueue_nested_archives(timeline: Timeline, new_path: str | None, parent_zip: Zip | None):
+def _enqueue_nested_archives(
+    timeline: Timeline,
+    new_path: str | None,
+    parent_zip: Zip | None,
+    *,
+    incremental_roots: list[str] | None = None,
+):
     new_path = _normalize_nested_scan_root(new_path, parent_zip)
     if not new_path:
         new_path = _normalize_nested_scan_root(timeline.get_current_path(), parent_zip)
@@ -1522,11 +1582,16 @@ def _enqueue_nested_archives(timeline: Timeline, new_path: str | None, parent_zi
             pw for pw in parent_zip.pw_list if pw
         ] + [pw for pw in nested_passwords if pw not in parent_zip.pw_list]
     nested_unresolved: list = []
-    unzipper.find_zip(
-        new_path, nested_passwords, conf.del_after_reunzip, already_add,
-        zip_list, depth=1, unresolved_list=nested_unresolved,
-        collect_unresolved=False, unresolved_limit=NESTED_UNRESOLVED_LIMIT,
-    )
+    scan_roots = [new_path] if incremental_roots is None else [
+        path for path in incremental_roots
+        if path and os.path.exists(path)
+    ]
+    for scan_root in scan_roots:
+        unzipper.find_zip(
+            scan_root, nested_passwords, conf.del_after_reunzip, already_add,
+            zip_list, depth=1, unresolved_list=nested_unresolved,
+            collect_unresolved=False, unresolved_limit=NESTED_UNRESOLVED_LIMIT,
+        )
     zip_list[:] = [
         item for item in zip_list
         if not any(item.name.endswith(ext) for ext in conf.blacklist)
@@ -1663,10 +1728,18 @@ def _process_unzip_timeline(timeline: Timeline):
     # unzipper.unzip() 会原地把命中的密码写回同一个 Zip 对象的 pw_list[0]。
     active_zip = _timeline_pending_zip(timeline)
     parent_zip = timeline.get_current_record().output_file
+    incremental_base = None
+    incremental_before = None
     if isinstance(parent_zip, Zip):
         source = timeline.records[0].input_file.path if timeline.records else None
         _refresh_zip_volumes(parent_zip, source)
         _prepare_zip_for_unzip(parent_zip)
+        # 仅套娃内层使用增量扫描。顶层、用户目录和恢复流程仍保持全量扫描，
+        # 避免改变标准压缩包及历史任务的发现语义。
+        if _is_nested_archive(parent_zip):
+            incremental_base = _resolve_work_root_containing(parent_zip.path)
+            if incremental_base and os.path.isdir(incremental_base):
+                incremental_before = _snapshot_scan_tree(incremental_base)
     if _skip_duplicate_volume_unzip(timeline):
         output_path = timeline.get_current_record().output_file.path
     else:
@@ -1695,7 +1768,26 @@ def _process_unzip_timeline(timeline: Timeline):
         new_path = timeline.get_current_path()
     if new_path and file_ops.is_dir_path(new_path):
         _register_work_root(new_path)
-    _enqueue_nested_archives(timeline, new_path, parent_zip)
+    incremental_roots = None
+    if (
+        incremental_base
+        and new_path
+        and os.path.normcase(os.path.normpath(incremental_base))
+        == os.path.normcase(os.path.normpath(new_path))
+    ):
+        incremental_roots = _incremental_scan_roots(
+            incremental_base, incremental_before,
+        )
+        if logger and incremental_roots is not None:
+            logger.debug(
+                '套娃增量扫描：{} 个新增根 [{}]'.format(
+                    len(incremental_roots),
+                    '],['.join(incremental_roots),
+                ),
+            )
+    _enqueue_nested_archives(
+        timeline, new_path, parent_zip, incremental_roots=incremental_roots,
+    )
 
 
 def _volume_stem(zip_obj) -> str | None:

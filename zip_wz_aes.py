@@ -42,6 +42,10 @@ def test_password(compress_file: str, password: str) -> tuple[bool, str]:
         return False, str(err)
     except (OSError, KeyError, ValueError) as err:
         return False, str(err)
+    except Exception as err:
+        # pyzipper 对不支持的 ZIP 变体（尤其跨卷）会抛出自身的 BadZipFile；
+        # 验密探测不应让该异常越过驱动层。
+        return False, str(err)
     return True, ''
 
 
@@ -68,4 +72,6 @@ def extract(
             raise WzAesZipError('Wrong password') from err
         raise WzAesZipError(msg) from err
     except (OSError, KeyError, ValueError) as err:
+        raise WzAesZipError(str(err)) from err
+    except Exception as err:
         raise WzAesZipError(str(err)) from err
