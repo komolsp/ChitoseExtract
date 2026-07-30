@@ -180,6 +180,13 @@ def sync_rename_registry() -> None:
         return
     for new_key, original in list(_rename_registry.items()):
         for bucket in (_discovered_paths, _unzipped_paths):
+            new_norm = _norm_path(new_key)
+            original_norm = _norm_path(original)
+            # A rename only transfers an archive's existing state.  Merely
+            # normalizing a disguised volume name must not promote it from
+            # "discovered" to "successfully extracted".
+            if new_norm not in bucket and original_norm not in bucket:
+                continue
             _note_path(new_key, bucket)
             _note_path(original, bucket)
 
