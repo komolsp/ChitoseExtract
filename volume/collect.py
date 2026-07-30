@@ -397,6 +397,13 @@ def collect_legacy_pattern(dirname: str, file_path: str) -> list[str] | None:
         return None
 
     zip_list: list[str] = []
+    if re_zip:
+        # 经典 ZIP 分卷以 stem.zip 为主卷，.z01/.z02 只是前置数据卷。
+        # 从任意 .zNN 扫描时也必须把主卷纳入，主卷尚未出现则不能建立残缺任务。
+        main_zip = os.path.join(dirname, re_zip.group(1) + '.zip')
+        if not os.path.isfile(main_zip):
+            return None
+        zip_list.append(main_zip)
     for file in os.listdir(dirname):
         match = re.search(pattern, file)
         if not match:

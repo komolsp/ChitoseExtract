@@ -15,7 +15,9 @@ _PIPELINE = (
     (collect.collect_simple_numeric, normalize.normalize_simple_numeric),
     (collect.collect_rar_oldstyle, normalize.normalize_rar_oldstyle),
     (collect.collect_fuzzy_zip, normalize.normalize_zip001),
-    (collect.collect_classic_zip, normalize.normalize_zip001),
+    # 经典 .z01/.z02/.../.zip 由 7-Zip 原生按卷名关联；改成 .001 会让
+    # ZIP 中央目录继续寻找原 .zNN 并报 Missing volume。
+    (collect.collect_classic_zip, None),
     (collect.collect_zip001_family, normalize.normalize_zip001),
     (collect.collect_rar_part, normalize.normalize_rar_part),
 )
@@ -26,6 +28,19 @@ def _legacy_normalizer(dirname: str, volumes: list[str]) -> list[str]:
     if re.search(r'\.part\d+', basename, re.IGNORECASE):
         return normalize.normalize_rar_part(dirname, volumes)
     if re.search(r'\.z\d{2}\b', basename, re.IGNORECASE):
+        main_zip = next(
+            (
+                path for path in volumes
+                if re.fullmatch(r'.+\.zip', os.path.basename(path), re.IGNORECASE)
+            ),
+            None,
+        )
+        if main_zip:
+            z_parts = sorted(
+                (path for path in volumes if path != main_zip),
+                key=lambda path: os.path.basename(path).lower(),
+            )
+            return [main_zip] + z_parts
         return normalize.normalize_zip001(dirname, volumes)
     return volumes
 
@@ -300,6 +315,17 @@ def is_complete_volume_group(volumes: list[str]) -> bool:
     """分卷组须含首卷（part1 / .001 等），否则首拖入时易误建残缺任务。"""
     if len(volumes) < 2:
         return False
+    basenames = [os.path.basename(path) for path in volumes]
+    classic_main = next(
+        (name[:-4] for name in basenames if name.lower().endswith('.zip')),
+        None,
+    )
+    if classic_main is not None:
+        # 经典 ZIP 的 .z01 是第一数据卷；通用编号把它映射为 2 是为了旧的
+        # .001 转换逻辑，保留原名模式下不能因此误判“缺少首卷”。
+        expected_z01 = (classic_main + '.z01').lower()
+        if any(name.lower() == expected_z01 for name in basenames):
+            return True
     indices = _volume_part_indices(volumes)
     if not indices:
         return True

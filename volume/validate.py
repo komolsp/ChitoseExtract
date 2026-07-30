@@ -186,6 +186,15 @@ def accept_volume_group(volumes: list[str]) -> bool:
     if len(volumes) < 2:
         return False
 
+    # .z01/.z02 只是经典 ZIP 分卷的数据卷；缺少同 stem 的 .zip 主卷时，
+    # 不得建立残缺任务，否则套娃扫描会抢先改名并误报密码错误。
+    z_parts = [
+        re.fullmatch(r'(.+)\.z\d{2}', os.path.basename(path), re.IGNORECASE)
+        for path in volumes
+    ]
+    if all(z_parts):
+        return False
+
     first = _part_one_path(volumes)
     if not first or not _first_volume_has_magic(first):
         return False

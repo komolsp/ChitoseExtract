@@ -11,6 +11,11 @@ RAR_OLDSTYLE_FIRST_RE = re.compile(r'^(?P<stem>.+)\.rar(?P<junk>.*)$', re.IGNORE
 SIMPLE_NUMERIC_RE = re.compile(r'^(?P<stem>.+)\.(?P<part>\d{1,3})$')
 TRAILING_NUMERIC_RE = re.compile(r'^(?P<stem>.+?)(?P<part>\d{1,3})$')
 LEADING_NUMERIC_RE = re.compile(r'^(?P<part>\d{1,3})(?P<stem>.+)$')
+APPENDED_SUFFIX_SPLIT_RE = re.compile(
+    r'^(?P<stem>.+?)(?:\.(?:7z|zip|rar))?'
+    r'\.(?P<part>\d{3})\.(?P<cover>[^.]+)$',
+    re.IGNORECASE,
+)
 _STANDALONE_ARCHIVE_SUFFIXES = frozenset({
     '7z', 'zip', 'rar', 'gz', 'bz2', 'xz', 'tar', 'tgz', 'tbz', 'txz', 'zst',
 })
@@ -141,6 +146,13 @@ def parse_leading_dot_disguised(basename: str) -> tuple[str, int] | None:
 
 def parse_disguised_split(basename: str) -> tuple[str, int] | None:
     """改后缀/插字分卷：下载.吗1对 / MAC.0删01 / 下载.part2掉 等。"""
+    # Standard numeric volumes with one camouflage suffix appended, such as
+    # archive.7z.001.pdf, archive.zip.002.jpg, or archive.003.txt.
+    # Restrict the appended suffix to known ordinary file types to avoid
+    # classifying arbitrary multi-extension files as volume parts.
+    appended = APPENDED_SUFFIX_SPLIT_RE.fullmatch(basename)
+    if appended and appended.group('cover').lower() in _NON_VOLUME_EXTENSIONS:
+        return appended.group('stem'), int(appended.group('part'))
     if parse_rar_oldstyle(basename):
         return None
     if fuzzy_zip_split_prefix(basename):

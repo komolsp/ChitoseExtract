@@ -55,19 +55,48 @@ def normalize_zip001(dirname: str, volumes: list[str]) -> list[str]:
     if not prefix_name:
         return volumes
 
+    # 经典 split ZIP 的物理顺序是 .z01, .z02, ..., .zip（中央目录在末卷）。
+    # 转成 7-Zip 的 .001 序列时不能把 .zip 放在首位。
+    classic_z_parts: dict[str, int] = {}
+    for path in volumes:
+        basename = os.path.basename(path)
+        match = re.fullmatch(
+            re.escape(prefix_name[:-4]) + r'\.z(\d{2})',
+            basename,
+            re.IGNORECASE,
+        ) if prefix_name.lower().endswith('.zip') else None
+        if match:
+            classic_z_parts[os.path.normcase(path)] = int(match.group(1))
+
     ordered: list[tuple[int, str]] = []
     for path in volumes:
-        order = _zip_part_order(prefix_name, os.path.basename(path))
+        path_key = os.path.normcase(path)
+        if classic_z_parts:
+            if path_key in classic_z_parts:
+                order = classic_z_parts[path_key]
+            elif os.path.basename(path).lower() == prefix_name.lower():
+                order = max(classic_z_parts.values()) + 1
+            else:
+                order = _zip_part_order(prefix_name, os.path.basename(path))
+        else:
+            order = _zip_part_order(prefix_name, os.path.basename(path))
         ordered.append((order, path))
     ordered.sort(key=lambda item: (item[0] if item[0] > 0 else 999, os.path.basename(item[1]).lower()))
 
     normalized: list[str] = []
     for index, (_, path) in enumerate(ordered, start=1):
         new_name = f'{prefix_name}.{index:03d}'
+        ideal_path = os.path.join(dirname, new_name)
+        # 已经规范化时直接复用自身。若先调用 unique_dest_path，它会把当前文件
+        # 当作同名冲突，第二次扫描便错误改成 archive.zip(1).001。
+        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+            os.path.abspath(ideal_path),
+        ):
+            normalized.append(path)
+            continue
         new_path = vol_rename.unique_dest_path(dirname, new_name)
-        if os.path.normcase(path) != os.path.normcase(new_path):
-            if vol_rename.rename_volume(path, new_path):
-                path = new_path
+        if vol_rename.rename_volume(path, new_path):
+            path = new_path
         normalized.append(path)
     return normalized
 
