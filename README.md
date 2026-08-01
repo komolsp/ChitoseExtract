@@ -1,10 +1,12 @@
 # ChitoseExtract v1.0
 
-面向 **DLsite 同人音声** 的 Windows 桌面批处理工具。支持将下载的压缩包自动走完完整流水线：
+面向 **DLsite 同人音声** 的 Windows 桌面批处理工具。
+---
+图形化主程序和配置界面。
 
-**解压 → 归档 → 过滤 → 重命名 → 转 FLAC → 写入元数据**
+主要基于[prekikoeru](https://github.com/Sakyoriii/prekikoeru)和[dlsite-doujin-renamer](https://github.com/yodhcn/dlsite-doujin-renamer)进行扩展功能，修复bug和提升易用性。
 
-程序基于 Python + Tkinter 开发，可打包为独立 exe，无需单独安装 Python 即可运行。
+主要开发方式为鞭打ai
 
 ---
 
@@ -12,15 +14,20 @@
 
 | 步骤 | 说明 |
 |------|------|
-| **解压** | 支持 ZIP / 7z / RAR 及分卷、伪装扩展名、嵌套压缩包、密码库自动尝试 |
-| **归档** | 将未识别 RJ 号的作品移入资源库，或整理到指定工作目录 |
+| **解压** | 常见压缩包格式改后缀、伪装扩展名、嵌套压缩包、隐写压缩包、分卷压缩等一键通杀，密码库多进程跑字典秒碰撞出密码，自动删除层层压缩套娃文件夹 |
+| **归档** | 识别RJ号匹配音声作品放入音声库，将未识别 RJ 号的作品移入资源库，或整理到指定工作目录 |
 | **过滤** | 按正则规则删除无 SE 版、MP3 冗余、宣传文件等 |
-| **重命名** | 根据 RJ 号从 DLsite 拉取元数据，按模板重命名文件夹 |
-| **转 FLAC** | 将 WAV / AIF 转为 FLAC（内置 flac、ffmpeg-minimal） |
+| **重命名** | 根据 RJ 号从 DLsite 拉取元数据，按模板重命名文件夹，将文件夹封面改为作品封面 |
+| **转 FLAC** | 将 WAV 转为 FLAC 保持高音质同时减少磁盘占用 |
 | **写入元数据** | 写入标签与封面，便于本地播放器识别 |
 
-其他特性：
+所有功能都可以自选是否在流程中启用，也可单独使用任一功能
 
+## 程序界面预览
+<img width="1456" height="1042" alt="image" src="https://github.com/user-attachments/assets/ab1230e5-ca8d-4fcc-85be-1913d8f053ca" />
+
+其他特性：
+- 解压时显示磁盘读写速度，实时监控任务进行情况
 - 拖放文件/文件夹到窗口即可加入任务队列
 - 逻辑删除（回收站）与套娃解压中间层清理
 - 多进程并行解压，可配置 7-Zip 内部线程数
@@ -86,7 +93,7 @@ launch.bat
 ├── dlrenamer/           # DLsite 元数据重命名模块
 ├── scraper/             # DLsite 刮削器
 ├── volume/              # 分卷识别与解析
-└── tests/               # 自动化测试（223 项）
+└── tests/               # 自动化测试（188 项）
 ```
 
 ---
@@ -143,42 +150,6 @@ workflow_steps:
 
 更详细的注释见 `config.yaml` 文件内说明。
 
----
-
-## 打包为 exe
-
-在项目源码目录执行：
-
-```bash
-.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.venv\Scripts\python.exe build.py
-```
-
-或双击 `build.bat`。该脚本会优先使用项目 `.venv`、安装锁定的发布依赖，
-并在打包完成后自动运行无 GUI 自检。
-
-请勿直接运行根目录中的 `ChitoseExtract.spec`；正式打包时由 `build.py`
-在 `build/` 目录中生成临时 spec。
-
-打包完成后输出：
-
-```
-dist/ChitoseExtract.exe
-dist/config.yaml
-dist/password.txt
-dist/7zip/
-dist/flac/
-dist/ffmpeg-minimal/    # 若本机已编译
-```
-
-将 `dist/` 内全部内容一并分发即可。
-
-可选：打包前自编译 minimal ffmpeg（处理 float WAV）：
-
-```powershell
-powershell -File scripts/build_minimal_ffmpeg.ps1
-python build.py --build-minimal-ffmpeg
-```
 
 ---
 
@@ -189,7 +160,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-当前测试套件共 **223** 项，覆盖分卷解析、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
+当前测试套件共 **188** 项，覆盖分卷解析、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
 
 ---
 
@@ -245,6 +216,6 @@ output: D:/音声/目录
 
 ## 参考文献
 - [prekikoeru](https://github.com/Sakyoriii/prekikoeru)
-- [dlsite-doujin-renamer](https://github.com/dlsite-com-ga/dlsite-doujin-renamer)
+- [dlsite-doujin-renamer](https://github.com/yodhcn/dlsite-doujin-renamer)
 - [SteganographierGUI](https://github.com/cenglin123/SteganographierGUI)
 - [dlonsei-formatter](https://github.com/somebelly/dlonsei-formatter)
