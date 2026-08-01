@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+build/
+dist/
+*.log
+log.txt
+**/log.txt
+startup_error.log.*
+ma_test_out.txt
+startup_error.log
+*.spec
+7zip/
+flac/
+ffmpeg-minimal/
+_build/
+github_update/
+.cursor/session-edited-files.txt
+
+# Local settings, secrets, and runtime data
+config.yaml
+**/config.yaml
+password.txt
+**/password.txt
+*.db
+
+# Generated release archives and local copies
+*.zip
+ChitoseExtract v*/
+_*.txt
+tests/_tmp*/

@@ -1,0 +1,13 @@
+ruamel.yaml
+chardet
+requests
+lxml
+pyquery
+Pillow
+pywin32
+windnd
+pydantic
+typing_extensions
+peewee
+mutagen
+pyzipper

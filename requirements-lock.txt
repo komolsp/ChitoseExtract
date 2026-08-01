@@ -1,0 +1,15 @@
+# Reproducible Windows release-build environment (top-level dependencies).
+ruamel.yaml==0.19.1
+chardet==7.4.3
+requests==2.34.2
+lxml==6.1.1
+pyquery==2.0.1
+Pillow==12.3.0
+pywin32==312
+windnd==1.0.7
+pydantic==2.13.4
+typing_extensions==4.16.0
+peewee==4.2.6
+mutagen==1.48.1
+pyzipper==0.4.0
+PyInstaller==6.21.0

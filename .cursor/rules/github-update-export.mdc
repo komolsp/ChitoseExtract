@@ -1,0 +1,18 @@
+---
+description: 会话结束前将修改过的文件导出到 github_update 文件夹
+alwaysApply: true
+---
+
+# GitHub 更新导出
+
+在完成有文件改动的任务后、结束回复前，执行导出脚本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .cursor/hooks/copy-for-github.ps1
+```
+
+脚本会优先复制 git 工作区中已修改/新增的文件；若无 git，则复制本次会话 Agent 编辑过的文件。结果保存在 `github_update/`，并保持原有目录结构。
+
+排除目录：`github_update/`、`.cursor/`、缓存与构建目录。
+
+若会话中做了代码修改但未自动导出，请主动运行上述命令。
