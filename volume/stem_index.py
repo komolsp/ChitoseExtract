@@ -33,13 +33,16 @@ def extract_part_info(basename: str) -> tuple[str, int] | None:
     return None
 
 
-def build_stem_groups(dirname: str) -> dict[str, dict[int, str]]:
+def build_stem_groups(
+    dirname: str, *, names: list[str] | None = None,
+) -> dict[str, dict[int, str]]:
     """扫描目录，返回 stem -> {part_index: path}。"""
     groups: dict[str, dict[int, str]] = {}
-    try:
-        names = os.listdir(dirname)
-    except OSError:
-        return groups
+    if names is None:
+        try:
+            names = os.listdir(dirname)
+        except OSError:
+            return groups
     for name in names:
         path = os.path.join(dirname, name)
         if not os.path.isfile(path):
@@ -62,13 +65,15 @@ def _stems_related(anchor_stem: str, stem: str) -> bool:
     return len(shorter) >= 2 and longer.startswith(shorter)
 
 
-def collect_by_stem(dirname: str, file_path: str) -> list[str] | None:
+def collect_by_stem(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     """目录级 stem 聚类：混用命名（吗1对/part2掉/删3）一次收齐。"""
     info = extract_part_info(os.path.basename(file_path))
     if not info:
         return None
     anchor_stem, _ = info
-    groups = build_stem_groups(dirname)
+    groups = build_stem_groups(dirname, names=names)
     merged: dict[int, str] = {}
     for stem, parts in groups.items():
         if not _stems_related(anchor_stem, stem):

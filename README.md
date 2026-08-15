@@ -156,11 +156,11 @@ workflow_steps:
 ## 运行测试
 
 ```bash
-pip install pytest
-python -m pytest tests/ -v
+pip install -r requirements.txt
+python -W ignore::ResourceWarning -m unittest discover -s tests -q
 ```
 
-当前测试套件共 **188** 项，覆盖分卷解析、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
+当前测试套件共 **276** 项，覆盖分卷解析、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
 
 ---
 

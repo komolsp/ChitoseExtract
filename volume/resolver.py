@@ -53,7 +53,7 @@ class VolumeIndex:
 
     def __init__(self, dirname: str):
         self.dirname = dirname
-        self._refresh_names()
+        self._names: list[str] = []
 
     def _refresh_names(self):
         try:
@@ -66,25 +66,29 @@ class VolumeIndex:
         basename = os.path.basename(file_path)
         parsed_7z = parse.parse_7z_split(basename)
         if parsed_7z:
-            volumes = collect.collect_7z(self.dirname, file_path)
+            volumes = collect.collect_7z(
+                self.dirname, file_path, names=self._names,
+            )
             if volumes and len(volumes) >= 2:
                 from volume.validate import accept_volume_group
-                if accept_volume_group(volumes):
+                if accept_volume_group(volumes, names=self._names):
                     return volumes
 
         candidates: list[tuple[float, list[str], object]] = []
         for collector, normalizer in _PIPELINE:
-            raw = collector(self.dirname, file_path)
+            raw = collector(self.dirname, file_path, names=self._names)
             if raw and len(raw) >= 2:
                 from volume.validate import accept_volume_group
-                if not accept_volume_group(raw):
+                if not accept_volume_group(raw, names=self._names):
                     continue
                 candidates.append((score.score_volume_group(raw), raw, normalizer))
 
-        legacy = collect.collect_legacy_pattern(self.dirname, file_path)
+        legacy = collect.collect_legacy_pattern(
+            self.dirname, file_path, names=self._names,
+        )
         if legacy and len(legacy) >= 2:
             from volume.validate import accept_volume_group
-            if accept_volume_group(legacy):
+            if accept_volume_group(legacy, names=self._names):
                 candidates.append((score.score_volume_group(legacy), legacy, _legacy_normalizer))
 
         seen: set[tuple[str, ...]] = set()
@@ -97,10 +101,12 @@ class VolumeIndex:
 
         picked = score.pick_best_candidate([(s, v) for s, v, _ in unique])
         if not picked:
-            cluster = stem_index.collect_by_stem(self.dirname, file_path)
+            cluster = stem_index.collect_by_stem(
+                self.dirname, file_path, names=self._names,
+            )
             if cluster and len(cluster) >= 2:
                 from volume.validate import accept_volume_group
-                if accept_volume_group(cluster):
+                if accept_volume_group(cluster, names=self._names):
                     return normalize.normalize_disguised_split(self.dirname, cluster)
             return None
 
@@ -118,25 +124,29 @@ class VolumeIndex:
         basename = os.path.basename(file_path)
         parsed_7z = parse.parse_7z_split(basename)
         if parsed_7z:
-            volumes = collect.collect_7z_readonly(self.dirname, file_path)
+            volumes = collect.collect_7z_readonly(
+                self.dirname, file_path, names=self._names,
+            )
             if volumes and len(volumes) >= 2:
                 from volume.validate import accept_volume_group
-                if accept_volume_group(volumes):
+                if accept_volume_group(volumes, names=self._names):
                     return volumes
 
         candidates: list[tuple[float, list[str]]] = []
         for collector, _normalizer in _PIPELINE:
-            raw = collector(self.dirname, file_path)
+            raw = collector(self.dirname, file_path, names=self._names)
             if raw and len(raw) >= 2:
                 from volume.validate import accept_volume_group
-                if not accept_volume_group(raw):
+                if not accept_volume_group(raw, names=self._names):
                     continue
                 candidates.append((score.score_volume_group(raw), raw))
 
-        legacy = collect.collect_legacy_pattern(self.dirname, file_path)
+        legacy = collect.collect_legacy_pattern(
+            self.dirname, file_path, names=self._names,
+        )
         if legacy and len(legacy) >= 2:
             from volume.validate import accept_volume_group
-            if accept_volume_group(legacy):
+            if accept_volume_group(legacy, names=self._names):
                 candidates.append((score.score_volume_group(legacy), legacy))
 
         seen: set[tuple[str, ...]] = set()
@@ -151,10 +161,12 @@ class VolumeIndex:
         if picked:
             return picked
 
-        cluster = stem_index.collect_by_stem(self.dirname, file_path)
+        cluster = stem_index.collect_by_stem(
+            self.dirname, file_path, names=self._names,
+        )
         if cluster and len(cluster) >= 2:
             from volume.validate import accept_volume_group
-            if accept_volume_group(cluster):
+            if accept_volume_group(cluster, names=self._names):
                 return cluster
         return None
 

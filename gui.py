@@ -65,6 +65,7 @@ STATUS_BANNER_INLINE_MAX = 36
 GUI_LOG_FLUSH_INTERVAL_MS = 50
 GUI_LOG_BATCH_SIZE = 1000
 GUI_LOG_MAX_LINES = 5000
+GUI_PROGRESS_BATCH_SIZE = 1000
 
 STEP_OPTIONS = [
     ('unzip', '解压'),
@@ -376,6 +377,11 @@ class Console(ttk.Frame):
         self._last_task_elapsed: float | None = None
         self._log_queue = None
         self._pending_gui_log: queue.Queue[str] = queue.Queue()
+        self._task_tree_items: dict[object, str] = {}
+        self._task_tree_rows: dict[object, tuple[tuple[str, str, str], tuple[str]]] = {}
+        self._task_tree_refresh_lock = threading.Lock()
+        self._pending_task_tree_refresh: tuple[list, bool] | None = None
+        self._task_tree_refresh_scheduled = False
         self._worker_busy = False
         self._worker_interrupted = False
         self._worker_last_step = None
@@ -677,12 +683,20 @@ class Console(ttk.Frame):
     def _clear_task_tree(self):
         for item in self.task_tree.get_children():
             self.task_tree.delete(item)
+        self._task_tree_items.clear()
+        self._task_tree_rows.clear()
+
+    @staticmethod
+    def _task_row_tag(index: int, ops: str | None) -> str:
+        failed = ops == 'rename_duplicate' or bool(ops and ops.endswith('_failed'))
+        return 'failed' if failed else ('odd' if index % 2 else 'even')
 
     def _insert_task_row(self, input_text, step_text, output_text, ops: str | None = None):
         count = len(self.task_tree.get_children())
-        failed = ops == 'rename_duplicate' or bool(ops and ops.endswith('_failed'))
-        tag = 'failed' if failed else ('odd' if count % 2 else 'even')
-        self.task_tree.insert('', 'end', values=(input_text, step_text, output_text), tags=(tag,))
+        tag = self._task_row_tag(count, ops)
+        return self.task_tree.insert(
+            '', 'end', values=(input_text, step_text, output_text), tags=(tag,),
+        )
 
     def write(self, info):
         """线程安全地缓存日志，由 Tk 主线程定时批量写入。"""
@@ -792,32 +806,95 @@ class Console(ttk.Frame):
 
         open_password_dialog(self)
 
-    def add2lisbox(self, q: queue.Queue):
-        def _do():
-            self._clear_task_tree()
-            qlist = list(q.queue)
-            for item in qlist:
-                record = item.get_current_record()
-                self._insert_task_row(
-                    record.input_file.path,
-                    _timeline_step_label(item),
-                    '',
-                    record.ops,
+    def _task_tree_row(self, item, index: int, legacy: bool):
+        record = item.get_current_record()
+        if legacy:
+            values = (
+                record.input_file.path,
+                _timeline_step_label(item),
+                '',
+            )
+        else:
+            values = (
+                task_runner._timeline_input_label(item),
+                _timeline_step_label(item),
+                _timeline_output_label(item),
+            )
+        return values, (self._task_row_tag(index, record.ops),)
+
+    def _sync_task_tree(self, item_list: list, *, legacy: bool = False):
+        """仅更新发生变化的任务行，避免每次状态刷新重建整棵 Treeview。"""
+        desired = list(item_list)
+        desired_set = set(desired)
+        current_order = list(self.task_tree.get_children())
+
+        for item, iid in list(self._task_tree_items.items()):
+            if item in desired_set:
+                continue
+            self.task_tree.delete(iid)
+            self._task_tree_items.pop(item, None)
+            self._task_tree_rows.pop(item, None)
+            if iid in current_order:
+                current_order.remove(iid)
+
+        for index, item in enumerate(desired):
+            row = self._task_tree_row(item, index, legacy)
+            iid = self._task_tree_items.get(item)
+            if iid is None:
+                values, tags = row
+                iid = self.task_tree.insert(
+                    '', index, values=values, tags=tags,
                 )
-        self._run_on_ui(_do)
+                self._task_tree_items[item] = iid
+                self._task_tree_rows[item] = row
+                current_order.insert(index, iid)
+                continue
+
+            if self._task_tree_rows.get(item) != row:
+                values, tags = row
+                self.task_tree.item(iid, values=values, tags=tags)
+                self._task_tree_rows[item] = row
+
+            if index >= len(current_order) or current_order[index] != iid:
+                self.task_tree.move(iid, '', index)
+                if iid in current_order:
+                    current_order.remove(iid)
+                current_order.insert(index, iid)
+
+    def _flush_task_tree_refresh(self):
+        with self._task_tree_refresh_lock:
+            pending = self._pending_task_tree_refresh
+            self._pending_task_tree_refresh = None
+        try:
+            if pending is not None:
+                items, legacy = pending
+                self._sync_task_tree(items, legacy=legacy)
+        finally:
+            with self._task_tree_refresh_lock:
+                has_more = self._pending_task_tree_refresh is not None
+                if not has_more:
+                    self._task_tree_refresh_scheduled = False
+        if has_more:
+            try:
+                self.after_idle(self._flush_task_tree_refresh)
+            except tk.TclError:
+                with self._task_tree_refresh_lock:
+                    self._task_tree_refresh_scheduled = False
+
+    def _queue_task_tree_refresh(self, item_list, *, legacy: bool):
+        snapshot = list(item_list)
+        with self._task_tree_refresh_lock:
+            self._pending_task_tree_refresh = (snapshot, legacy)
+            if self._task_tree_refresh_scheduled:
+                return
+            self._task_tree_refresh_scheduled = True
+        self._run_on_ui(self._flush_task_tree_refresh)
+
+    def add2lisbox(self, q: queue.Queue):
+        self._queue_task_tree_refresh(list(q.queue), legacy=True)
 
     def add2lis(self, item_list):
-        def _do():
-            self._clear_task_tree()
-            for item in item_list:
-                record = item.get_current_record()
-                self._insert_task_row(
-                    task_runner._timeline_input_label(item),
-                    _timeline_step_label(item),
-                    _timeline_output_label(item),
-                    record.ops,
-                )
-        self._run_on_ui(_do)
+        self._queue_task_tree_refresh(item_list, legacy=False)
 
     def _clear_disk_panel_widgets(self):
         for widget in self._disk_panel.winfo_children():
@@ -994,11 +1071,18 @@ class Console(ttk.Frame):
     def flush_progress_once(self):
         if self._log_queue is None:
             return
-        while not self._log_queue.empty():
-            item = self._log_queue.get(block=False)
+        latest_by_list: dict[str, str] = {}
+        for _ in range(GUI_PROGRESS_BATCH_SIZE):
+            try:
+                item = self._log_queue.get(block=False)
+            except queue.Empty:
+                break
             if item is None:
-                return
+                break
             list_id, msg = item
+            latest_by_list[list_id] = msg
+
+        for msg in latest_by_list.values():
             value, maximum = extract_fraction(msg)
             if value is not None and maximum is not None:
                 self.update_progress(value, maximum, msg)

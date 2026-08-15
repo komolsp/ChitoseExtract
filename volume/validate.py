@@ -45,11 +45,14 @@ def is_volume_like_basename(basename: str) -> bool:
     return collect._is_disguised_volume_candidate(basename)
 
 
-def count_volume_like_files(dirname: str) -> int:
-    try:
-        names = os.listdir(dirname)
-    except OSError:
-        return 0
+def count_volume_like_files(
+    dirname: str, *, names: list[str] | None = None,
+) -> int:
+    if names is None:
+        try:
+            names = os.listdir(dirname)
+        except OSError:
+            return 0
     count = 0
     for name in names:
         path = os.path.join(dirname, name)
@@ -91,7 +94,9 @@ def _first_volume_has_magic(first_path: str) -> bool:
     )
 
 
-def _classic_zip_data_head(volumes: list[str]) -> str | None:
+def _classic_zip_data_head(
+    volumes: list[str], *, names: list[str] | None = None,
+) -> str | None:
     """返回经典 ZIP 的 .z01 数据首卷，主卷可以是 .zip 或 .zip删。"""
     mains: list[tuple[str, bool, str]] = []
     z_parts: dict[int, tuple[str, str]] = {}
@@ -116,10 +121,13 @@ def _classic_zip_data_head(volumes: list[str]) -> str | None:
         return None
     stem, disguised, main_path = mains[0]
     if disguised:
-        try:
-            sibling_names = os.listdir(os.path.dirname(main_path))
-        except OSError:
-            return None
+        if names is None:
+            try:
+                sibling_names = os.listdir(os.path.dirname(main_path))
+            except OSError:
+                return None
+        else:
+            sibling_names = names
         if any(name.casefold() == f'{stem}.zip' for name in sibling_names):
             return None
     if any(part_stem != stem for part_stem, _ in z_parts.values()):
@@ -195,14 +203,16 @@ def classify_archive_probe(first_path: str) -> str:
     return 'complete'
 
 
-def needs_probe_validation(volumes: list[str]) -> bool:
+def needs_probe_validation(
+    volumes: list[str], *, names: list[str] | None = None,
+) -> bool:
     """异名分卷，或同目录有多余卷号样文件时，须试读验证。"""
     if len(volumes) < 2:
         return False
     if _is_cross_stem_group(volumes):
         return True
     dirname = os.path.dirname(os.path.abspath(volumes[0]))
-    return count_volume_like_files(dirname) > len(volumes)
+    return count_volume_like_files(dirname, names=names) > len(volumes)
 
 
 def _is_unambiguous_rar_part_group(volumes: list[str]) -> bool:
@@ -219,12 +229,14 @@ def _is_unambiguous_rar_part_group(volumes: list[str]) -> bool:
     return len(volumes) >= 2
 
 
-def accept_volume_group(volumes: list[str]) -> bool:
+def accept_volume_group(
+    volumes: list[str], *, names: list[str] | None = None,
+) -> bool:
     """判定候选分卷组是否通过魔数 + 7z 试读验证。"""
     if len(volumes) < 2:
         return False
 
-    classic_head = _classic_zip_data_head(volumes)
+    classic_head = _classic_zip_data_head(volumes, names=names)
     if classic_head:
         # 经典 ZIP 的中央目录位于末卷，主卷开头通常没有 PK 魔数；应校验 .z01。
         return magic.is_zip_file(classic_head)
@@ -245,7 +257,7 @@ def accept_volume_group(volumes: list[str]) -> bool:
     if _is_unambiguous_rar_part_group(volumes):
         return True
 
-    if not needs_probe_validation(volumes):
+    if not needs_probe_validation(volumes, names=names):
         return True
 
     status = classify_archive_probe(first)

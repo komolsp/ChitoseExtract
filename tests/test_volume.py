@@ -748,6 +748,27 @@ class VolumeResolveTest(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_readonly_resolve_scans_directory_once(self):
+        """同一次分卷解析应让所有收集器共享一份目录快照。"""
+        d = self._tmpdir()
+        try:
+            first = os.path.join(d, 'work.part1.rar')
+            second = os.path.join(d, 'work.part2.rar')
+            with open(first, 'wb') as stream:
+                stream.write(b'Rar!\x1a\x07\x00' + b'\x00' * 32)
+            with open(second, 'wb') as stream:
+                stream.write(b'\x00' * 32)
+
+            clear_index_cache()
+            real_listdir = os.listdir
+            with mock.patch('os.listdir', wraps=real_listdir) as listdir:
+                volumes = VolumeResolver.peek_volumes(first)
+
+            self.assertEqual(volumes, [first, second])
+            self.assertEqual(listdir.call_count, 1)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()

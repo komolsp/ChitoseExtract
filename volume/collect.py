@@ -7,6 +7,11 @@ from collections import defaultdict
 from volume import parse
 
 
+def _directory_names(dirname: str, names: list[str] | None) -> list[str]:
+    """复用解析器提供的目录快照；独立调用时保持原有扫描行为。"""
+    return names if names is not None else os.listdir(dirname)
+
+
 def _sorted_paths(volumes: list[tuple[int, str]]) -> list[str]:
     volumes.sort(key=lambda item: (item[0], os.path.basename(item[1]).lower()))
     return [path for _, path in volumes]
@@ -44,13 +49,14 @@ def _collect_by_parser(
     parser,
     *,
     stem_prefix: bool = True,
+    names: list[str] | None = None,
 ) -> list[str] | None:
     parsed = parser(os.path.basename(file_path))
     if not parsed:
         return None
     stem, _ = parsed
     volumes: list[tuple[int, str]] = []
-    for name in os.listdir(dirname):
+    for name in _directory_names(dirname, names):
         if stem_prefix and not name.startswith(stem + '.'):
             continue
         if name == stem:
@@ -70,7 +76,9 @@ def _collect_by_parser(
     return _sorted_paths(volumes)
 
 
-def collect_7z(dirname: str, file_path: str) -> list[str] | None:
+def collect_7z(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     from volume import rename as vol_rename
 
     basename = os.path.basename(file_path)
@@ -83,7 +91,7 @@ def collect_7z(dirname: str, file_path: str) -> list[str] | None:
     found: list[tuple[int, str]] = []
     first_part_path = os.path.join(dirname, f'{base_name}.001')
 
-    for file in os.listdir(dirname):
+    for file in _directory_names(dirname, names):
         match = part_re.match(file)
         if not match:
             continue
@@ -101,7 +109,9 @@ def collect_7z(dirname: str, file_path: str) -> list[str] | None:
     return _sorted_paths(found)
 
 
-def collect_7z_readonly(dirname: str, file_path: str) -> list[str] | None:
+def collect_7z_readonly(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     """collect_7z 的只读版本：不将 *.补 重命名为 *.001。"""
     basename = os.path.basename(file_path)
     parsed = parse.parse_7z_split(basename)
@@ -113,7 +123,7 @@ def collect_7z_readonly(dirname: str, file_path: str) -> list[str] | None:
     found: list[tuple[int, str]] = []
     first_part_path = os.path.join(dirname, f'{base_name}.001')
 
-    for file in os.listdir(dirname):
+    for file in _directory_names(dirname, names):
         match = part_re.match(file)
         if not match:
             continue
@@ -131,14 +141,21 @@ def collect_7z_readonly(dirname: str, file_path: str) -> list[str] | None:
     return _sorted_paths(found)
 
 
-def collect_trailing_numeric(dirname: str, file_path: str) -> list[str] | None:
+def collect_trailing_numeric(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     return _collect_by_parser(
-        dirname, file_path, parse.parse_trailing_numeric, stem_prefix=False,
+        dirname, file_path, parse.parse_trailing_numeric,
+        stem_prefix=False, names=names,
     )
 
 
-def collect_disguised_split(dirname: str, file_path: str) -> list[str] | None:
-    return _collect_by_parser(dirname, file_path, parse.parse_disguised_split)
+def collect_disguised_split(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
+    return _collect_by_parser(
+        dirname, file_path, parse.parse_disguised_split, names=names,
+    )
 
 
 def _7z_cross_stem_part_info(basename: str) -> tuple[str, int] | None:
@@ -161,7 +178,9 @@ def _score_7z_cross_stem_candidate(basename: str) -> float:
     return score
 
 
-def collect_cross_stem_7z_split(dirname: str, file_path: str) -> list[str] | None:
+def collect_cross_stem_7z_split(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     """每卷 stem 不同但后缀仍为 .7z.NNN 时按卷号 1..N 聚组。"""
     anchor_name = os.path.basename(file_path)
     anchor_info = _7z_cross_stem_part_info(anchor_name)
@@ -169,7 +188,7 @@ def collect_cross_stem_7z_split(dirname: str, file_path: str) -> list[str] | Non
         return None
 
     part_candidates: dict[int, list[tuple[str, str, str]]] = defaultdict(list)
-    for name in os.listdir(dirname):
+    for name in _directory_names(dirname, names):
         path = os.path.join(dirname, name)
         if not os.path.isfile(path):
             continue
@@ -223,12 +242,14 @@ def _cross_stem_part_info(basename: str) -> tuple[str, int] | None:
     return _7z_cross_stem_part_info(basename)
 
 
-def peek_cross_stem_group(dirname: str, file_path: str) -> bool:
+def peek_cross_stem_group(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> bool:
     """无副作用判断是否存在跨 stem 分卷组（供 probe 使用）。"""
     from volume.validate import accept_volume_group
     for collector in (collect_cross_stem_7z_split, collect_cross_stem_disguised):
-        raw = collector(dirname, file_path)
-        if raw and len(raw) >= 2 and accept_volume_group(raw):
+        raw = collector(dirname, file_path, names=names)
+        if raw and len(raw) >= 2 and accept_volume_group(raw, names=names):
             return True
     return False
 
@@ -251,7 +272,9 @@ def _score_disguised_candidate(basename: str) -> float:
     return score
 
 
-def collect_cross_stem_disguised(dirname: str, file_path: str) -> list[str] | None:
+def collect_cross_stem_disguised(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     """每卷文件名完全不同（咦嘻.7z你1 / 哈.2啥 / 猫1 / 老2 …）时按卷号 1..N 聚组。"""
     anchor_name = os.path.basename(file_path)
     anchor_info = _cross_stem_part_info(anchor_name)
@@ -259,7 +282,7 @@ def collect_cross_stem_disguised(dirname: str, file_path: str) -> list[str] | No
         return None
 
     part_candidates: dict[int, list[tuple[str, str, str]]] = defaultdict(list)
-    for name in os.listdir(dirname):
+    for name in _directory_names(dirname, names):
         path = os.path.join(dirname, name)
         if not os.path.isfile(path):
             continue
@@ -305,26 +328,38 @@ def collect_cross_stem_disguised(dirname: str, file_path: str) -> list[str] | No
     return [chosen[part] for part in sorted(chosen.keys())]
 
 
-def collect_simple_numeric(dirname: str, file_path: str) -> list[str] | None:
-    return _collect_by_parser(dirname, file_path, parse.parse_simple_numeric)
+def collect_simple_numeric(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
+    return _collect_by_parser(
+        dirname, file_path, parse.parse_simple_numeric, names=names,
+    )
 
 
-def collect_rar_part(dirname: str, file_path: str) -> list[str] | None:
-    return _collect_by_parser(dirname, file_path, parse.parse_rar_part)
+def collect_rar_part(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
+    return _collect_by_parser(dirname, file_path, parse.parse_rar_part, names=names)
 
 
-def collect_rar_oldstyle(dirname: str, file_path: str) -> list[str] | None:
-    return _collect_by_parser(dirname, file_path, parse.parse_rar_oldstyle)
+def collect_rar_oldstyle(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
+    return _collect_by_parser(
+        dirname, file_path, parse.parse_rar_oldstyle, names=names,
+    )
 
 
-def collect_fuzzy_zip(dirname: str, file_path: str) -> list[str] | None:
+def collect_fuzzy_zip(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     basename = os.path.basename(file_path)
     prefix = parse.fuzzy_zip_split_prefix(basename)
     if not prefix:
         return None
     prefix_name = os.path.basename(prefix)
     volumes: list[tuple[int, str]] = []
-    for name in os.listdir(dirname):
+    for name in _directory_names(dirname, names):
         if not name.startswith(prefix_name + '.'):
             continue
         if name == prefix_name:
@@ -336,7 +371,9 @@ def collect_fuzzy_zip(dirname: str, file_path: str) -> list[str] | None:
     return _sorted_paths(volumes)
 
 
-def collect_zip001_family(dirname: str, file_path: str) -> list[str] | None:
+def collect_zip001_family(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     basename = os.path.basename(file_path)
     if re.match(r'^.+\.zip\.\d{3}$', basename, re.IGNORECASE):
         prefix_name = re.sub(r'\.\d{3}$', '', basename, flags=re.IGNORECASE)
@@ -346,7 +383,7 @@ def collect_zip001_family(dirname: str, file_path: str) -> list[str] | None:
         return None
 
     volumes: list[str] = []
-    for name in os.listdir(dirname):
+    for name in _directory_names(dirname, names):
         path = os.path.join(dirname, name)
         if not os.path.isfile(path):
             continue
@@ -357,7 +394,9 @@ def collect_zip001_family(dirname: str, file_path: str) -> list[str] | None:
     return volumes if len(volumes) >= 2 else None
 
 
-def collect_classic_zip(dirname: str, file_path: str) -> list[str] | None:
+def collect_classic_zip(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     basename = os.path.basename(file_path)
     if not re.match(r'^.+\.zip$', basename, re.IGNORECASE):
         return None
@@ -376,7 +415,9 @@ def collect_classic_zip(dirname: str, file_path: str) -> list[str] | None:
     return volumes if len(volumes) >= 2 else None
 
 
-def collect_disguised_classic_zip(dirname: str, file_path: str) -> list[str] | None:
+def collect_disguised_classic_zip(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     """经典 ZIP 分卷的主卷被追加无点后缀：archive.zip删 + archive.z01。"""
     basename = os.path.basename(file_path)
     z_match = re.fullmatch(r'(?P<stem>.+)\.z(?P<part>\d{2})', basename, re.IGNORECASE)
@@ -390,10 +431,11 @@ def collect_disguised_classic_zip(dirname: str, file_path: str) -> list[str] | N
     else:
         return None
 
-    try:
-        names = os.listdir(dirname)
-    except OSError:
-        return None
+    if names is None:
+        try:
+            names = os.listdir(dirname)
+        except OSError:
+            return None
 
     # 已有标准 .zip 时交给 collect_classic_zip，避免把旁边的备份文件误当主卷。
     if any(name.casefold() == f'{stem}.zip'.casefold() for name in names):
@@ -428,7 +470,9 @@ def collect_disguised_classic_zip(dirname: str, file_path: str) -> list[str] | N
     return disguised_mains + [z_parts[part] for part in sorted(z_parts)]
 
 
-def collect_legacy_pattern(dirname: str, file_path: str) -> list[str] | None:
+def collect_legacy_pattern(
+    dirname: str, file_path: str, *, names: list[str] | None = None,
+) -> list[str] | None:
     basename = os.path.basename(file_path)
     pattern_7z = r'(.*)\.\d{3}\b'
     pattern_rar = r'(.*)\.part\d+'
@@ -456,7 +500,7 @@ def collect_legacy_pattern(dirname: str, file_path: str) -> list[str] | None:
         if not os.path.isfile(main_zip):
             return None
         zip_list.append(main_zip)
-    for file in os.listdir(dirname):
+    for file in _directory_names(dirname, names):
         match = re.search(pattern, file)
         if not match:
             continue
@@ -502,8 +546,12 @@ def volume_group_identity_for_anchor(file_path: str) -> tuple | None:
     if not os.path.isfile(anchor):
         return None
     dirname = os.path.dirname(os.path.abspath(anchor))
+    try:
+        names = os.listdir(dirname)
+    except OSError:
+        return None
     for collector in (collect_cross_stem_7z_split, collect_cross_stem_disguised):
-        raw = collector(dirname, anchor)
+        raw = collector(dirname, anchor, names=names)
         if raw and len(raw) >= 2:
             return volume_group_identity(raw)
     return None
