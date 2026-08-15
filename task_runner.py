@@ -31,6 +31,11 @@ from queue_scanner import (
     volume_task_identity as queue_volume_task_identity,
     zip_volume_identities as queue_zip_volume_identities,
 )
+from unzip_executor import (
+    UnzipExecutionDependencies,
+    UnzipExecutor,
+    unzip_task_priority as executor_unzip_task_priority,
+)
 
 workflow_context = WorkflowContext()
 logger = workflow_context.services.logger
@@ -43,6 +48,7 @@ progress_ui = workflow_context.services.progress_ui
 already_add = workflow_context.state.already_add
 timelines = workflow_context.state.timelines
 _queue_scanner = QueueScanner(workflow_context.state)
+_unzip_executor = UnzipExecutor(workflow_context.state)
 
 # 顶层压缩包「就地解压」产生的作品工作目录集合（保留原始大小写）。
 # 用于让整个流程识别出音声库之外的临时工作目录边界：先在原地解压识别，
@@ -1163,15 +1169,7 @@ def _refresh_zip_volumes(zip_obj: Zip, source_path: str | None = None):
 
 def _unzip_task_priority(timeline: Timeline) -> tuple[int, str]:
     """完整分卷组优先；残缺组靠后，等其它任务可能释出首卷。"""
-    record = timeline.get_current_record()
-    zip_obj = record.output_file
-    path_key = getattr(zip_obj, 'path', '') or ''
-    if isinstance(zip_obj, Zip) and zip_obj.volumes and len(zip_obj.volumes) > 1:
-        from volume.resolver import is_complete_volume_group
-        if is_complete_volume_group(zip_obj.volumes):
-            return (0, path_key)
-        return (2, path_key)
-    return (1, path_key)
+    return executor_unzip_task_priority(timeline)
 
 
 def requeue_unzip_failure(timeline: Timeline) -> bool:
@@ -1223,8 +1221,7 @@ def requeue_unzip_failure(timeline: Timeline) -> bool:
 
 
 def _requeue_unzip_failures():
-    for timeline in timelines:
-        requeue_unzip_failure(timeline)
+    return _unzip_executor.requeue_failures(requeue_unzip_failure)
 
 
 def _is_path_queued(path: str) -> bool:
@@ -1306,50 +1303,21 @@ def unzip_loop():
     _requeue_unzip_failures()
     _requeue_stuck_outer_timelines()
     monitor = _start_unzip_disk_monitor()
-    unzip_round = 0
     try:
-        while True:
-            unzip_round += 1
-            if unzip_round > _MAX_UNZIP_ROUNDS:
-                if logger:
-                    logger.error(
-                        '套娃解压轮次超过 {} 次，已中止以防重复解压；'
-                        '请检查是否有压缩包反复被识别或密码错误任务未清除'.format(
-                            _MAX_UNZIP_ROUNDS,
-                        )
-                    )
-                break
-            pending = [t for t in timelines if t.records[-1].ops == 'find_zip']
-            if not pending:
-                break
-            pending.sort(key=_unzip_task_priority)
-            for timeline in pending:
-                active_zip = _timeline_pending_zip(timeline)
-                try:
-                    _process_unzip_timeline(timeline)
-                except Exception as err:
-                    if isinstance(active_zip, Zip) and _recover_outer_with_pending_inner(timeline, active_zip):
-                        if logger:
-                            logger.info(
-                                '外层解压遇内层加密项报错，已转入内层："{}"'.format(
-                                    os.path.normpath(active_zip.path or ''),
-                                ),
-                            )
-                        continue
-                    failed_zip = active_zip if isinstance(active_zip, Zip) else timeline.get_current_record().output_file
-                    if isinstance(failed_zip, Zip):
-                        timeline.add_record(Record(failed_zip, 'unzip_failed', failed_zip))
-                    else:
-                        record = timeline.get_current_record()
-                        timeline.add_record(Record(record.output_file, 'unzip_failed', record.output_file))
-                    logger.error(
-                        '处理解压任务异常，已标记失败并继续其余任务: {}: {}'.format(
-                            getattr(failed_zip, 'path', timeline.get_current_path()),
-                            err,
-                        )
-                    )
-                    logger.debug(traceback.format_exc())
-            progress_ui.add2lis(timelines)
+        on_round_complete = None
+        if progress_ui != 'not initialized':
+            on_round_complete = progress_ui.add2lis
+        _unzip_executor.run(
+            max_rounds=_MAX_UNZIP_ROUNDS,
+            dependencies=UnzipExecutionDependencies(
+                process_timeline=_process_unzip_timeline,
+                pending_zip=_timeline_pending_zip,
+                recover_timeline=_recover_outer_with_pending_inner,
+                task_priority=_unzip_task_priority,
+                logger=logger,
+                on_round_complete=on_round_complete,
+            ),
+        )
         password.write_password(password.sort_passwords(passwords))
         # 全部套娃解压完成后再统一拍平，避免内层 zip 尚未解压时过早处理
         # 解压失败的任务仍停留在原压缩包路径（不在音声库内），跳过以避免无意义的告警

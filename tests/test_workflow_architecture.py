@@ -42,6 +42,14 @@ class WorkflowContextTests(unittest.TestCase):
     def test_task_runner_compatibility_aliases_share_context_state(self):
         self.assertIs(task_runner.timelines, task_runner.workflow_context.state.timelines)
         self.assertIs(task_runner.already_add, task_runner.workflow_context.state.already_add)
+        self.assertIs(
+            task_runner._queue_scanner.state,
+            task_runner.workflow_context.state,
+        )
+        self.assertIs(
+            task_runner._unzip_executor.state,
+            task_runner.workflow_context.state,
+        )
         self.assertIs(task_runner._work_roots, task_runner.workflow_context.state.work_roots)
         self.assertIs(
             task_runner._work_root_preferred_names,
