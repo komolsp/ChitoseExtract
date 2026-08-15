@@ -228,7 +228,9 @@ OPS_LABEL = {
     'tag_audio': '已写入元数据',
     'unzip_failed': '解压失败',
     'scan_failed': '未发现可解压文件',
+    'archive_failed': '归档失败',
     'filter_failed': '过滤失败',
+    'rename_failed': '重命名失败',
     'convert_audio_failed': '转换失败',
     'tag_audio_failed': '写入元数据失败',
 }
@@ -993,16 +995,22 @@ class Console(ttk.Frame):
         if self._worker_busy:
             return
         start_process = str(self.val.get())
-        threading.Thread(target=self._run_dash_worker, args=(start_process,), daemon=True).start()
+        self._last_task_elapsed = None
+        self._set_ui_busy(True)
+        self._clear_run_status_banner()
+        self.clear_disk_speed_panel()
+        worker = threading.Thread(
+            target=self._run_dash_worker,
+            args=(start_process,),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception:
+            self._set_ui_busy(False)
+            raise
 
     def _run_dash_worker(self, start_process):
-        def _begin():
-            self._last_task_elapsed = None
-            self._set_ui_busy(True)
-            self._clear_run_status_banner()
-            self.clear_disk_speed_panel()
-
-        self._run_on_ui(_begin)
         task_started_at = time.perf_counter()
         ran_full_from_unzip = False
         last_process = None

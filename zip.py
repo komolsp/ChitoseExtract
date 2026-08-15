@@ -8,7 +8,7 @@ from timeline import Archive
 
 class Zip(Archive):
 
-    def __init__(self, file, password_list: list = [], del_after_unzip: bool = False, jap: bool = False
+    def __init__(self, file, password_list: list | None = None, del_after_unzip: bool = False, jap: bool = False
                  , covered: bool = False, format_type: str | None = None,
                  volumes: list = None):
         super(Zip, self).__init__(file)
@@ -18,7 +18,7 @@ class Zip(Archive):
         self.jap = jap
         self.covered = covered
         self.format_type = format_type
-        self.set_password(password_list)
+        self.set_password([] if password_list is None else password_list)
         self.volumes = volumes
         self.namelist_scanned = False
         self.scan_fingerprint = None

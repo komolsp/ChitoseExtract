@@ -945,7 +945,12 @@ class Unzipper():
                     f'  已加入任务队列（状态：解压失败），可双击补充密码后重试：{path}'
                 )
             unresolved_list.append(zip_entity)
-            if not zip_entity.volumes or zip_entity.volumes == [zip_entity.path]:
+            if zip_entity.volumes and len(zip_entity.volumes) > 1:
+                archive_registry.note_discovered(zip_entity.path, zip_entity.volumes)
+                for volume in zip_entity.volumes:
+                    if volume not in already_add:
+                        already_add.append(volume)
+            else:
                 if zip_entity.path not in already_add:
                     already_add.append(zip_entity.path)
             return
@@ -1078,17 +1083,19 @@ class Unzipper():
                              format_type=None)
             zip_entity.path = volumes[0]
             zip_entity.volumes = volumes
-            archive_registry.note_discovered(zip_entity.path, volumes)
-            already_add.extend(volumes)
             log = ' 发现分卷压缩文件： [{}]'.format('],['.join(volumes))
             probe_limit = NESTED_PASSWORD_PROBE_LIMIT if depth > 0 else None
             if self.load_namelist(zip_entity, password_probe_limit=probe_limit):
                 zip_list.append(zip_entity)
+                archive_registry.note_discovered(zip_entity.path, volumes)
+                already_add.extend(volumes)
                 self.logger.info(log)
                 return True
             if depth > 0 and not collect_unresolved:
                 zip_entity.invalidate_namelist_scan()
                 zip_list.append(zip_entity)
+                archive_registry.note_discovered(zip_entity.path, volumes)
+                already_add.extend(volumes)
                 self.logger.info(
                     '  发现内层分卷压缩文件（解压时再试完整密码库）： [{}]'.format(
                         '],['.join(volumes),
@@ -1132,10 +1139,6 @@ class Unzipper():
             zip_entity.path = volumes[0]
             zip_entity.volumes = volumes
             zip_entity.format_type = None  # 分卷由 7-Zip 按首卷自动识别，避免 -t7z 误判
-            archive_registry.note_discovered(zip_entity.path, volumes)
-            already_add.extend(volumes)
-            log = ' 发现分卷压缩文件： [{}]'.format('],['.join(volumes))
-
             log = ' 发现分卷压缩文件： [{}]'.format('],['.join(volumes))
 
         probe_limit = NESTED_PASSWORD_PROBE_LIMIT if depth > 0 else None

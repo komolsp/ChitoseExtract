@@ -177,6 +177,23 @@ def restore_renames_in_directory(dirname: str) -> int:
     return restored
 
 
+def restore_all_renames() -> int:
+    """还原本次运行登记的全部临时分卷名；未能安全还原的项保留登记。"""
+    restored = 0
+    for key in list(_rename_registry.keys()):
+        before = key in _rename_registry
+        _restore_single(key)
+        if before and key not in _rename_registry:
+            restored += 1
+    if restored:
+        try:
+            from volume.resolver import clear_index_cache
+            clear_index_cache()
+        except ImportError:
+            pass
+    return restored
+
+
 def restore_renamed_volumes(volumes: list[str]) -> list[str]:
     """将规范化后的分卷路径还原为拖入时的原始文件名。"""
     if not volumes:

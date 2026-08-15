@@ -5,10 +5,12 @@ PASSWORD_PATH = 'password.txt'
 
 
 class Password:
-    def __init__(self, password: str, add_date: str = str(datetime.datetime.now().date()), hit_count: int = 0,
+    def __init__(self, password: str, add_date: str | None = None, hit_count: int = 0,
                  last_hit_date: str = ''):
         self.password = password  # 密码内容
-        self.add_date = add_date  # 添加日期
+        self.add_date = (
+            str(datetime.datetime.now().date()) if add_date is None else add_date
+        )  # 添加日期
         self.hit_count = hit_count  # 命中次数
         self.last_hit_date = last_hit_date  # 最后一次命中日期
 

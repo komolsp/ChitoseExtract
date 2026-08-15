@@ -214,6 +214,76 @@ class VolumeResolveTest(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_failed_volume_group_is_kept_once_for_password_retry(self):
+        import archive_registry
+        from unzipper import Unzipper
+
+        d = self._tmpdir()
+        archive_registry.clear()
+        try:
+            volumes = [
+                os.path.join(d, 'locked.7z.001'),
+                os.path.join(d, 'locked.7z.002'),
+            ]
+            for path in volumes:
+                with open(path, 'wb') as stream:
+                    stream.write(b'volume')
+            unzipper = Unzipper.__new__(Unzipper)
+            unzipper.logger = mock.MagicMock()
+            unzipper.load_namelist = mock.MagicMock(return_value=False)
+            already = []
+            discovered = []
+            unresolved = []
+
+            with mock.patch(
+                'unzipper.file_ops.resolve_volume_archives',
+                return_value=volumes,
+            ), mock.patch(
+                'volume.resolver.is_complete_volume_group',
+                return_value=True,
+            ):
+                found = unzipper.find_zip(
+                    volumes[0], [], False, already, discovered,
+                    unresolved_list=unresolved,
+                    collect_unresolved=True,
+                )
+                unzipper.find_zip(
+                    volumes[1], [], False, already, discovered,
+                    unresolved_list=unresolved,
+                    collect_unresolved=True,
+                )
+
+            self.assertFalse(found)
+            self.assertEqual(discovered, [])
+            self.assertEqual(len(unresolved), 1)
+            self.assertEqual(unresolved[0].volumes, volumes)
+            self.assertEqual(already, volumes)
+        finally:
+            archive_registry.clear()
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_clearing_queue_restores_pending_volume_names(self):
+        import task_runner
+        from volume.rename import clear_rename_registry, rename_volume
+
+        d = self._tmpdir()
+        clear_rename_registry()
+        try:
+            original = os.path.join(d, '拖入分卷名.奇1')
+            normalized = os.path.join(d, '拖入分卷名.7z.001')
+            with open(original, 'wb') as stream:
+                stream.write(b'volume')
+            self.assertTrue(rename_volume(original, normalized))
+            self.assertFalse(os.path.exists(original))
+
+            task_runner.clear()
+
+            self.assertTrue(os.path.isfile(original))
+            self.assertFalse(os.path.exists(normalized))
+        finally:
+            clear_rename_registry()
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_simple_numeric_zip(self):
         d = self._tmpdir()
         try:

@@ -42,11 +42,11 @@ def extend(new: Archive, old: Archive):
 
 
 class Record:
-    def __init__(self, input_file: Archive, ops, output_file: Archive = None, finish_time=datetime.now()):
+    def __init__(self, input_file: Archive, ops, output_file: Archive = None, finish_time=None):
         self.input_file: Archive = input_file
         self.output_file: Archive = output_file
         self.ops = ops
-        self.finish_time = finish_time
+        self.finish_time = datetime.now() if finish_time is None else finish_time
 
 
 class Timeline:

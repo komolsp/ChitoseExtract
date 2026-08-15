@@ -230,3 +230,9 @@ if __name__ == '__main__':
                 resource.shutdown()
         elif resource is not None:
             resource.shutdown()
+        try:
+            from volume.rename import restore_all_renames
+            restore_all_renames()
+        except Exception:
+            # 退出清理不能覆盖原始异常；失败项会在日志中保留原文件名恢复告警。
+            pass

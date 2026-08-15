@@ -1385,7 +1385,10 @@ def get_similar(path):  # 获得与输入路径相似文件路径
     if os.path.exists(filename):
         return filename
     father, name = os.path.split(path)  # 所在文件夹
-    files = os.listdir(father)
+    try:
+        files = os.listdir(father)
+    except OSError:
+        return None
     max_similar = 0  # 相似度最高值
     result = None
     for file in files:

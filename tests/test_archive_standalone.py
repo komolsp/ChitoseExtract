@@ -53,6 +53,24 @@ class TestArchiveStandalone(unittest.TestCase):
         self.assertEqual(len(moved), 1)
         self.assertIn('RJ01653819', moved[0])
 
+    def test_blank_resource_path_keeps_unknown_work_in_audio_library(self):
+        task_runner.conf.resource_path = ''
+        task_runner.logger = MagicMock()
+        work_root = os.path.join(self.download, '未识别作品_pk')
+        os.makedirs(work_root)
+        with open(os.path.join(work_root, 'track.wav'), 'wb') as fh:
+            fh.write(b'data')
+        archive = Archive(work_root)
+        timeline = Timeline(archive, 'create_timeline', archive)
+        task_runner.timelines.append(timeline)
+        task_runner._register_work_root(work_root)
+
+        task_runner.archive_loop()
+
+        self.assertFalse(os.path.isdir(work_root))
+        self.assertEqual(os.listdir(self.output), ['未识别作品_pk'])
+        self.assertEqual(timeline.get_current_record().ops, 'archive')
+
     def test_prepare_archive_queue_registers_dropped_folder(self):
         work_root = os.path.join(self.download, 'RJ01629264_pk')
         os.makedirs(work_root)

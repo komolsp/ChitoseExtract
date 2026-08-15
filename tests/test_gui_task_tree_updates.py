@@ -105,6 +105,32 @@ class GuiTaskTreeUpdateTests(unittest.TestCase):
         console.update_progress.assert_called_once_with(99, 100, '解压中 99/100')
         console.val2.set.assert_not_called()
 
+    def test_dash_sets_busy_before_starting_worker(self):
+        console = object.__new__(Console)
+        console._worker_busy = False
+        console._last_task_elapsed = 1.0
+        console.val = mock.Mock()
+        console.val.get.return_value = 'unzip'
+        console._clear_run_status_banner = mock.Mock()
+        console.clear_disk_speed_panel = mock.Mock()
+
+        def set_busy(value):
+            console._worker_busy = value
+
+        console._set_ui_busy = mock.Mock(side_effect=set_busy)
+        worker = mock.Mock()
+        with mock.patch('gui.threading.Thread', return_value=worker) as thread:
+            console.dash()
+            console.dash()
+
+        thread.assert_called_once_with(
+            target=console._run_dash_worker,
+            args=('unzip',),
+            daemon=True,
+        )
+        worker.start.assert_called_once_with()
+        console._set_ui_busy.assert_called_once_with(True)
+
 
 if __name__ == '__main__':
     unittest.main()

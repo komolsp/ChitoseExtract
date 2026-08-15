@@ -2152,7 +2152,8 @@ def archive_loop():
     prepare_archive_queue()
     flattened_roots: set[str] = set()
     for timeline in timelines:
-        if _timeline_step_failed(timeline):
+        current_ops = timeline.get_current_record().ops
+        if _timeline_step_failed(timeline) and current_ops != 'archive_failed':
             continue
         root = _resolve_task_work_root(timeline.get_current_path())
         root_key = _work_root_key(root)
@@ -2165,7 +2166,8 @@ def archive_loop():
             _flatten_work_root(root)
     processed_roots: set[str] = set()
     for timeline in timelines:
-        if _timeline_step_failed(timeline):
+        current_ops = timeline.get_current_record().ops
+        if _timeline_step_failed(timeline) and current_ops != 'archive_failed':
             continue
         target_path = _resolve_task_work_root(timeline.get_current_path())
         if not target_path:
@@ -2183,7 +2185,13 @@ def archive_loop():
             continue
         processed_roots.add(root_key)
         try:
-            archive(timeline)
+            archived_path = archive(timeline)
+            if (
+                archived_path is None
+                and timeline.get_current_record().ops != 'archive_failed'
+                and not _timeline_step_succeeded(timeline, 'archive')
+            ):
+                _append_step_record(timeline, 'archive_failed')
         except Exception as err:
             if logger:
                 logger.error(
@@ -2192,6 +2200,11 @@ def archive_loop():
                     )
                 )
                 logger.debug(traceback.format_exc())
+            if (
+                timeline.get_current_record().ops != 'archive_failed'
+                and not _timeline_step_succeeded(timeline, 'archive')
+            ):
+                _append_step_record(timeline, 'archive_failed')
         if progress_ui != 'not initialized':
             progress_ui.add2lis(timelines)
 
@@ -2425,7 +2438,7 @@ def _move_to_resource_library(work_path: str) -> str | None:
     """未识别 RJ 时，将作品文件夹从音声库移入资源库。"""
     resource_root = _resource_library_path()
     if not resource_root:
-        return None
+        return _move_to_audio_library(work_path, identified_rj=False)
     resource_root = os.path.normpath(resource_root)
     work_norm = os.path.normpath(work_path)
     if os.path.normcase(resource_root) == os.path.normcase(conf.output_path):
@@ -2456,7 +2469,7 @@ def _move_to_resource_library(work_path: str) -> str | None:
     return new_path
 
 
-def _move_to_audio_library(work_path: str) -> str | None:
+def _move_to_audio_library(work_path: str, *, identified_rj: bool = True) -> str | None:
     """识别到 RJ 后，将就地解压的作品文件夹移入音声库（output）。
 
     若作品已在音声库内（套娃/复处理场景），原样返回。
@@ -2474,8 +2487,10 @@ def _move_to_audio_library(work_path: str) -> str | None:
     if os.path.normcase(os.path.normpath(work_path)) != os.path.normcase(os.path.normpath(new_path)):
         _remap_work_root(work_path, new_path)
     if logger:
+        action = '已识别 RJ，移入音声库' if identified_rj else '未配置资源库，保留在音声库'
         logger.info(
-            '已识别 RJ，移入音声库："{}" -> "{}"'.format(
+            '{}："{}" -> "{}"'.format(
+                action,
                 os.path.normpath(work_path), os.path.normpath(new_path),
             )
         )
@@ -2842,7 +2857,8 @@ def rename_loop():
     succeeded_roots = set()
     relocated_roots: list[tuple[str, str]] = []
     for timeline in timelines:
-        if _timeline_step_failed(timeline):
+        current_ops = timeline.get_current_record().ops
+        if _timeline_step_failed(timeline) and current_ops != 'rename_failed':
             continue
         # 未识别 RJ 已移入资源库的作品不参与重命名（不在音声库内，且应保持原样）
         if _is_in_resource_library(timeline.get_current_path()):
@@ -2858,6 +2874,8 @@ def rename_loop():
                         os.path.normpath(rename_root),
                     )
                 )
+            if timeline.get_current_record().ops != 'rename_failed':
+                _append_step_record(timeline, 'rename_failed')
             continue
         rename_root = narrowed
         root_key = os.path.normcase(rename_root)
@@ -2892,6 +2910,8 @@ def rename_loop():
                             os.path.normpath(skip_path),
                         )
                     )
+                if timeline.get_current_record().ops != 'rename_failed':
+                    _append_step_record(timeline, 'rename_failed')
                 continue
             new_path = rename(timeline)
         except Exception as err:
@@ -2902,12 +2922,22 @@ def rename_loop():
                     )
                 )
                 logger.debug(traceback.format_exc())
+            if (
+                timeline.get_current_record().ops not in ('rename_failed', 'rename_duplicate')
+                and not _timeline_step_succeeded(timeline, 'rename')
+            ):
+                _append_step_record(timeline, 'rename_failed')
             continue
         if new_path is not None:
             succeeded_roots.add(root_key)
             new_root = os.path.normpath(new_path)
             succeeded_roots.add(os.path.normcase(new_root))
             relocated_roots.append((rename_root, new_root))
+        elif (
+            timeline.get_current_record().ops not in ('rename_failed', 'rename_duplicate')
+            and not _timeline_step_succeeded(timeline, 'rename')
+        ):
+            _append_step_record(timeline, 'rename_failed')
 
     # dlrenamer 会直接移动作品目录；同步更新同作品的套娃影子时间线，
     # 否则后续音频步骤只处理新路径，而影子任务仍停在已不存在的旧路径，
@@ -3101,6 +3131,7 @@ def tag_audio_loop():
 def tag_audio(timeline: Timeline):
     root = _rename_root_path(timeline.get_current_path())
     if not root:
+        _append_step_record(timeline, 'tag_audio_failed')
         return None
     rj = _resolve_rj_for_timeline_root(root, timeline)
     if not rj:
@@ -3108,8 +3139,10 @@ def tag_audio(timeline: Timeline):
             logger.warning(
                 '未找到 RJ 号，已跳过写入元数据："{}"'.format(os.path.normpath(root))
             )
+        _append_step_record(timeline, 'tag_audio_failed')
         return None
     if not conf:
+        _append_step_record(timeline, 'tag_audio_failed')
         return None
 
     scraper = get_shared_scraper(conf.renamer_config)
@@ -3117,6 +3150,7 @@ def tag_audio(timeline: Timeline):
     if not metadata or not metadata.get('work_name'):
         if logger:
             logger.warning('未获取到 DLsite 元数据，已跳过写入元数据：{}'.format(rj))
+        _append_step_record(timeline, 'tag_audio_failed')
         return None
 
     cover_bytes = b''
@@ -3239,6 +3273,9 @@ def delete_file(file_path) -> bool:  # 删除方法，若配置逻辑删除则�
 
 
 def clear():
+    from volume.rename import restore_all_renames
+
+    restore_all_renames()
     workflow_context.state.clear()
     archive_registry.clear()
 

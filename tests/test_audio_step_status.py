@@ -84,6 +84,42 @@ class AudioStepStatusTests(unittest.TestCase):
         self.assertEqual(timeline.get_current_record().ops, 'tag_audio_failed')
         self.assertTrue(task_runner._timeline_step_failed(timeline))
 
+    def test_missing_rj_is_recorded_as_tagging_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = Timeline(Archive(tmp), 'rename', Archive(tmp))
+            task_runner.conf = SimpleNamespace(
+                audio_tag_config={'embed_cover': False},
+                renamer_config={},
+            )
+            with mock.patch.object(
+                task_runner, '_rename_root_path', return_value=tmp,
+            ), mock.patch.object(
+                task_runner, '_resolve_rj_for_timeline_root', return_value=None,
+            ):
+                self.assertIsNone(task_runner.tag_audio(timeline))
+
+        self.assertEqual(timeline.get_current_record().ops, 'tag_audio_failed')
+
+    def test_missing_metadata_is_recorded_as_tagging_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = Timeline(Archive(tmp), 'rename', Archive(tmp))
+            task_runner.conf = SimpleNamespace(
+                audio_tag_config={'embed_cover': False},
+                renamer_config={},
+            )
+            scraper = mock.MagicMock()
+            scraper.scrape_metadata.return_value = None
+            with mock.patch.object(
+                task_runner, '_rename_root_path', return_value=tmp,
+            ), mock.patch.object(
+                task_runner, '_resolve_rj_for_timeline_root', return_value='RJ123456',
+            ), mock.patch.object(
+                task_runner, 'get_shared_scraper', return_value=scraper,
+            ):
+                self.assertIsNone(task_runner.tag_audio(timeline))
+
+        self.assertEqual(timeline.get_current_record().ops, 'tag_audio_failed')
+
     def test_audio_loops_retry_their_own_failure_state(self):
         cases = (
             ('convert_audio_failed', 'convert_audio', 'convert_audio_loop', 'convert_audio'),

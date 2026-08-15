@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import task_runner
@@ -7,6 +8,18 @@ from zip import Zip
 
 
 class PasswordSortTests(unittest.TestCase):
+    def test_default_password_date_is_evaluated_for_each_instance(self):
+        with mock.patch('password.datetime.datetime') as mocked_datetime:
+            mocked_datetime.now.side_effect = [
+                datetime(2026, 8, 15),
+                datetime(2026, 8, 16),
+            ]
+            first = Password('first')
+            second = Password('second')
+
+        self.assertEqual(first.add_date, '2026-08-15')
+        self.assertEqual(second.add_date, '2026-08-16')
+
     def test_newer_password_is_preferred_over_more_hits(self):
         older_popular = Password('older', '2026-08-03', 100, '2026-08-04')
         newer_unused = Password('newer', '2026-08-04', 0, '')

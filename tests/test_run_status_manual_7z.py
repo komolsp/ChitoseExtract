@@ -8,7 +8,9 @@ from zip import Zip
 
 class RunStatusManual7zTests(unittest.TestCase):
     def test_failure_ops_have_readable_labels(self):
+        self.assertEqual(_ops_label('archive_failed'), '归档失败')
         self.assertEqual(_ops_label('filter_failed'), '过滤失败')
+        self.assertEqual(_ops_label('rename_failed'), '重命名失败')
         self.assertEqual(_ops_label('convert_audio_failed'), '转换失败')
         self.assertEqual(_ops_label('tag_audio_failed'), '写入元数据失败')
 
