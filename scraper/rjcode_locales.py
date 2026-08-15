@@ -97,17 +97,6 @@ def classify_workno_locale(product_info: dict) -> str | None:
     return None
 
 
-def _gather_language_edition_worknos(product_info: dict | None) -> set[str]:
-    worknos: set[str] = set()
-    if not product_info:
-        return worknos
-    for edition in product_info.get('language_editions') or []:
-        code = normalize_workno(edition.get('workno'))
-        if code:
-            worknos.add(code)
-    return worknos
-
-
 def rjcodes_from_language_editions(product_info: dict | None) -> dict[str, str]:
     """从 product.json 的 language_editions 映射各语言 RJ 号。"""
     by_locale: dict[str, str] = {}

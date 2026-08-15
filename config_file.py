@@ -1,5 +1,3 @@
-import json
-import os
 import re
 from typing import Annotated, Optional, Union, Literal
 from pydantic import Field
@@ -7,7 +5,13 @@ from typing_extensions import TypedDict
 from pydantic import TypeAdapter, ConfigDict, ValidationError
 from scraper import Locale
 
-FilenameStr = Annotated[str, Field(pattern=r'^[^\/:*?"<>|]*$', description="""不能含有系统保留字[^\/:*?`<>|]*""")]
+FilenameStr = Annotated[
+    str,
+    Field(
+        pattern=r'^[^\/:*?"<>|]*$',
+        description=r'不能含有系统保留字[^\/:*?`<>|]*',
+    ),
+]
 RjcodeStr = Annotated[str, Field(pattern=re.compile(r".*rjcode.*"), description='template 应是一个包含 "rjcode" 的字符串')]
 
 class Config(TypedDict):
@@ -88,47 +92,6 @@ DEFAULT_CONFIG: Config = {
     'renamer_move_root': 'RENAMER_MOVE_ROOT',
     'renamer_move_template': 'maker_name/series_name/age_cat[rjcode] work_name cv_list_str'
 }
-
-
-class ConfigFile(object):
-    def __init__(self, file_path: str):
-        self.__config: Config = None
-        self.__config_dict = None
-        self.__file_path = file_path
-        if not os.path.isfile(file_path):
-            self.save_config(DEFAULT_CONFIG)
-
-    def load_config_dict(self):
-        """
-        从配置文件中读取配置
-        """
-        with open(self.__file_path, encoding='UTF-8') as file:
-            config_dict = json.load(file)
-            self.__config_dict = config_dict
-
-    def save_config(self, config: Config):
-        """
-        保存配置到文件
-        """
-        with open(self.__file_path, 'w', encoding='UTF-8') as file:
-            json.dump(config, file, indent=2, ensure_ascii=False)
-
-    @property
-    def file_path(self):
-        return self.__file_path
-
-    @property
-    def config(self):
-        return self.__config
-
-    def verify_config(self) -> list[str]:
-        """
-        验证配置是否合理
-        """
-        validated, strerror_list = verify_config_dict(self.__config_dict)
-        if validated is not None:
-            self.__config = validated
-        return strerror_list
 
 
 def _normalize_renamer_config(config_dict: dict) -> dict:

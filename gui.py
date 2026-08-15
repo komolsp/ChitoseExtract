@@ -62,6 +62,9 @@ STATUS_GIF_GAP = 10
 STATUS_TOP_ROW_HEIGHT = STATUS_GIF_SIZE + 8
 STATUS_BANNER_ROW_HEIGHT = 22
 STATUS_BANNER_INLINE_MAX = 36
+GUI_LOG_FLUSH_INTERVAL_MS = 50
+GUI_LOG_BATCH_SIZE = 1000
+GUI_LOG_MAX_LINES = 5000
 
 STEP_OPTIONS = [
     ('unzip', '解压'),
@@ -222,6 +225,10 @@ OPS_LABEL = {
     'convert_audio': '已转换',
     'tag_audio': '已写入元数据',
     'unzip_failed': '解压失败',
+    'scan_failed': '未发现可解压文件',
+    'filter_failed': '过滤失败',
+    'convert_audio_failed': '转换失败',
+    'tag_audio_failed': '写入元数据失败',
 }
 
 
@@ -314,6 +321,13 @@ def _format_run_status_summary(
     if interrupted and last_step == 'unzip':
         return '解压已中断', detail, ''
 
+    scan_failed = counts.get('未发现可解压文件', 0)
+    if scan_failed and scan_failed == len(timelines):
+        suffix = '请检查分卷是否完整或文件名是否被改动'
+        return '未发现可解压文件', suffix, ''
+    if scan_failed:
+        return '部分完成', detail, ''
+
     failed = counts.get('解压失败', 0)
     if failed and failed == len(timelines):
         suffix = f'{failed} 个任务待重试' if failed > 1 else '1 个任务待重试'
@@ -325,6 +339,12 @@ def _format_run_status_summary(
     duplicate = counts.get('库中有重复', 0)
     if duplicate:
         return '库中有重复内容', detail, ''
+
+    if last_step and all(
+        task_runner._timeline_step_succeeded(timeline, last_step)
+        for timeline in timelines
+    ):
+        return '已完成', detail, ''
 
     if len(counts) == 1 and '已完成' in counts:
         return '已完成', detail, ''
@@ -355,11 +375,13 @@ class Console(ttk.Frame):
         self._disk_speed_vars: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
         self._last_task_elapsed: float | None = None
         self._log_queue = None
+        self._pending_gui_log: queue.Queue[str] = queue.Queue()
         self._worker_busy = False
         self._worker_interrupted = False
         self._worker_last_step = None
         self._build_layout()
         self._task_buttons = self._collect_task_buttons()
+        self.after(GUI_LOG_FLUSH_INTERVAL_MS, self._flush_gui_log)
 
     def _collect_task_buttons(self):
         buttons = [self.btn_run, self.btn_clear, self.btn_settings, self.btn_output,
@@ -658,14 +680,38 @@ class Console(ttk.Frame):
 
     def _insert_task_row(self, input_text, step_text, output_text, ops: str | None = None):
         count = len(self.task_tree.get_children())
-        tag = 'failed' if ops in ('unzip_failed', 'rename_duplicate') else ('odd' if count % 2 else 'even')
+        failed = ops == 'rename_duplicate' or bool(ops and ops.endswith('_failed'))
+        tag = 'failed' if failed else ('odd' if count % 2 else 'even')
         self.task_tree.insert('', 'end', values=(input_text, step_text, output_text), tags=(tag,))
 
     def write(self, info):
-        def _do():
-            self.text.insert('end', info)
+        """线程安全地缓存日志，由 Tk 主线程定时批量写入。"""
+        self._pending_gui_log.put(info)
+
+    def _flush_gui_log(self):
+        pending: list[str] = []
+        for _ in range(GUI_LOG_BATCH_SIZE):
+            try:
+                pending.append(self._pending_gui_log.get_nowait())
+            except queue.Empty:
+                break
+
+        if pending:
+            self.text.insert('end', ''.join(pending))
+            try:
+                line_count = int(self.text.index('end-1c').split('.', 1)[0])
+            except (ValueError, tk.TclError):
+                line_count = 0
+            overflow = line_count - GUI_LOG_MAX_LINES
+            if overflow > 0:
+                self.text.delete('1.0', f'{overflow + 1}.0')
             self.text.see(tk.END)
-        self._run_on_ui(_do)
+
+        delay = 0 if len(pending) >= GUI_LOG_BATCH_SIZE else GUI_LOG_FLUSH_INTERVAL_MS
+        try:
+            self.after(delay, self._flush_gui_log)
+        except tk.TclError:
+            pass
 
     def clear(self):
         if self._worker_busy:

@@ -33,30 +33,39 @@ def _has_winrar() -> bool:
     return fixtures.winrar_exe() is not None
 
 
-@unittest.skipUnless(_has_seven_zip(), '需要内置或系统 7-Zip')
-class ArchiveFixtureSmokeTest(unittest.TestCase):
-    """确保样本构建器可正常工作。"""
+_SHARED_FIXTURE_BASE: str | None = None
+_SHARED_FIXTURES: dict | None = None
 
-    @classmethod
-    def setUpClass(cls):
-        cls._base = tempfile.mkdtemp(prefix='archive_fixture_smoke_')
-        cls.fixtures = fixtures.build_fixture_tree(cls._base)
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls._base, ignore_errors=True)
+def _shared_fixture_tree() -> tuple[str, dict]:
+    global _SHARED_FIXTURE_BASE, _SHARED_FIXTURES
+    if _SHARED_FIXTURES is None:
+        _SHARED_FIXTURE_BASE = tempfile.mkdtemp(prefix='archive_scenarios_')
+        _SHARED_FIXTURES = fixtures.build_fixture_tree(_SHARED_FIXTURE_BASE)
+    return _SHARED_FIXTURE_BASE, _SHARED_FIXTURES
 
-    def test_plain_archives_exist(self):
-        for fmt in ('zip', '7z', 'rar'):
-            path = self.fixtures['plain'][fmt]
-            self.assertTrue(os.path.isfile(path), fmt)
-            probe = file_ops.probe_archive(path)
-            self.assertTrue(probe.is_candidate, fmt)
 
-    def test_split_volumes_created(self):
-        for fmt in ('zip', '7z', 'rar'):
-            vols = self.fixtures['volumes'][fmt]
-            self.assertGreaterEqual(len(vols), 2, fmt)
+def _build_small_zip_volumes(work_dir: str, stem: str) -> list[str]:
+    payload = fixtures.write_payload_file(
+        work_dir, f'{stem}.bin', bytes(range(256)) * 400,
+    )
+    return fixtures._build_zip_volumes(work_dir, stem, payload)
+
+
+def _write_plain_zip(work_dir: str, name: str = 'plain.zip') -> str:
+    os.makedirs(work_dir, exist_ok=True)
+    path = os.path.join(work_dir, name)
+    with open(path, 'wb') as handle:
+        handle.write(fixtures.create_zip_bytes(content=os.urandom(2048)))
+    return path
+
+
+def tearDownModule():
+    global _SHARED_FIXTURE_BASE, _SHARED_FIXTURES
+    if _SHARED_FIXTURE_BASE:
+        shutil.rmtree(_SHARED_FIXTURE_BASE, ignore_errors=True)
+    _SHARED_FIXTURE_BASE = None
+    _SHARED_FIXTURES = None
 
 
 @unittest.skipUnless(_has_seven_zip(), '需要内置或系统 7-Zip')
@@ -65,12 +74,7 @@ class ProbeArchiveScenarioTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._base = tempfile.mkdtemp(prefix='probe_scenario_')
-        cls.fixtures = fixtures.build_fixture_tree(cls._base)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls._base, ignore_errors=True)
+        cls._base, cls.fixtures = _shared_fixture_tree()
 
     def _probe(self, rel_path: str, *, nested: bool = False):
         path = rel_path
@@ -79,8 +83,8 @@ class ProbeArchiveScenarioTest(unittest.TestCase):
         return file_ops.probe_archive(path, nested=nested)
 
     def test_standard_formats_are_candidates(self):
-        for fmt in ('zip', '7z', 'rar'):
-            probe = self._probe(self.fixtures['plain'][fmt])
+        for fmt, path in self.fixtures['plain'].items():
+            probe = self._probe(path)
             self.assertTrue(probe.is_candidate, fmt)
 
     def test_disguised_extensions(self):
@@ -111,8 +115,7 @@ class ProbeArchiveScenarioTest(unittest.TestCase):
 
     def test_volume_parts_are_candidates(self):
         clear_index_cache()
-        for fmt in ('zip', '7z', 'rar'):
-            vols = self.fixtures['volumes'][fmt]
+        for fmt, vols in self.fixtures['volumes'].items():
             for vol in vols:
                 probe = file_ops.probe_archive(vol)
                 self.assertTrue(probe.is_candidate, f'{fmt}:{os.path.basename(vol)}')
@@ -140,18 +143,18 @@ class ArchiveOpenStrategyTest(unittest.TestCase):
 
     def test_standard_zip_no_covered(self):
         with tempfile.TemporaryDirectory() as tmp:
-            plain = fixtures.build_plain_archives(tmp)
-            probe = file_ops.probe_archive(plain['zip'])
+            path = _write_plain_zip(tmp)
+            probe = file_ops.probe_archive(path)
             strategies = file_ops.build_archive_open_strategies(
-                probe, '.zip', plain['zip'],
+                probe, '.zip', path,
             )
             self.assertTrue(any(not c for _, c in strategies))
             self.assertFalse(any(c for _, c in strategies))
 
     def test_disguised_dat_allows_covered(self):
         with tempfile.TemporaryDirectory() as tmp:
-            plain = fixtures.build_plain_archives(tmp)
-            disguised = fixtures.build_disguised_copies(tmp, plain['zip'], ['x.dat'])
+            plain = _write_plain_zip(tmp)
+            disguised = fixtures.build_disguised_copies(tmp, plain, ['x.dat'])
             path = disguised['x.dat']
             probe = file_ops.probe_archive(path)
             strategies = file_ops.build_archive_open_strategies(
@@ -161,7 +164,7 @@ class ArchiveOpenStrategyTest(unittest.TestCase):
 
     def test_volume_only_auto_strategy(self):
         with tempfile.TemporaryDirectory() as tmp:
-            vols = fixtures.build_split_volumes(tmp)['zip']
+            vols = _build_small_zip_volumes(tmp, 'strategy')
             probe = file_ops.probe_archive(vols[0])
             strategies = file_ops.build_archive_open_strategies(
                 probe, '.001', vols[0], is_volume=True,
@@ -175,13 +178,8 @@ class SevenZipExtractIntegrationTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._base = tempfile.mkdtemp(prefix='extract_integration_')
-        cls.fixtures = fixtures.build_fixture_tree(cls._base)
+        cls._base, cls.fixtures = _shared_fixture_tree()
         cls.driver = SevenZDriver()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls._base, ignore_errors=True)
 
     def _extract(self, archive_path: str, out_dir: str, *, password: str = '') -> list[str]:
         probe = file_ops.probe_archive(archive_path)
@@ -280,20 +278,26 @@ class UnzipperFindZipIntegrationTest(unittest.TestCase):
     def test_find_zip_discovers_disguised_and_volumes(self):
         base = tempfile.mkdtemp(prefix='find_zip_')
         try:
-            fx = fixtures.build_fixture_tree(base)
+            disguise_dir = os.path.join(base, 'disguise')
+            volume_dir = os.path.join(base, 'volumes')
+            plain_zip = _write_plain_zip(disguise_dir)
+            disguised = fixtures.build_disguised_copies(
+                disguise_dir, plain_zip, ['game.dat'],
+            )
+            os.remove(plain_zip)
+            zip_vols = _build_small_zip_volumes(volume_dir, 'zipvol')
             zip_list: list[Zip] = []
             self.unzipper.find_zip(
                 base, [''], False, [], zip_list,
             )
             discovered_paths = {os.path.normcase(z.path) for z in zip_list}
             self.assertTrue(
-                os.path.normcase(fx['disguised']['game.dat']) in discovered_paths
+                os.path.normcase(disguised['game.dat']) in discovered_paths
                 or any('game.dat' in p for p in discovered_paths),
             )
             vol_paths = {
                 os.path.normcase(v) for z in zip_list if z.volumes for v in z.volumes
             }
-            zip_vols = fx['volumes']['zip']
             self.assertTrue(
                 any(os.path.normcase(v) in vol_paths for v in zip_vols)
                 or any('zipvol.zip' in p for p in vol_paths),
@@ -357,14 +361,9 @@ class NestedMatryoshkaExtractTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._base = tempfile.mkdtemp(prefix='matryoshka_')
-        cls.fixtures = fixtures.build_fixture_tree(cls._base)
+        cls._base, cls.fixtures = _shared_fixture_tree()
         cls.driver = SevenZDriver()
         cls.unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(2))
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls._base, ignore_errors=True)
 
     def _extract_with_strategies(self, path: str, out_dir: str) -> None:
         probe = file_ops.probe_archive(path)
@@ -416,7 +415,7 @@ class VolumeResolverRealFileTest(unittest.TestCase):
     def test_resolve_real_zip_volumes(self):
         base = tempfile.mkdtemp(prefix='vol_resolve_')
         try:
-            vols = fixtures.build_split_volumes(base, stem='onlyzip')['zip']
+            vols = _build_small_zip_volumes(base, 'onlyzip')
             resolved = resolve_volume_archives(vols[1])
             self.assertIsNotNone(resolved)
             self.assertEqual(len(resolved), len(vols))
@@ -430,7 +429,7 @@ class VolumeResolverRealFileTest(unittest.TestCase):
 
         base = tempfile.mkdtemp(prefix='vol_classify_')
         try:
-            vols = fixtures.build_split_volumes(base, stem='probezip')['zip']
+            vols = _build_small_zip_volumes(base, 'probezip')
             self.assertGreaterEqual(len(vols), 2)
             self.assertEqual(classify_archive_probe(vols[0]), 'split')
         finally:
@@ -439,7 +438,7 @@ class VolumeResolverRealFileTest(unittest.TestCase):
     def test_incomplete_volume_group_rejected(self):
         base = tempfile.mkdtemp(prefix='vol_incomplete_')
         try:
-            vols = fixtures.build_split_volumes(base)['zip']
+            vols = _build_small_zip_volumes(base, 'split')
             orphan = vols[-1]
             for path in vols[:-1]:
                 os.remove(path)

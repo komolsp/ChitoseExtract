@@ -80,7 +80,7 @@ class PasswordDialog(tk.Toplevel):
         hint_frame.grid(row=0, column=0, sticky='ew', pady=(0, 10))
         ttk.Label(
             hint_frame,
-            text='按从上到下顺序尝试密码；命中次数越高、最近命中的密码会优先排序。',
+            text='匹配时优先尝试最近添加的密码；同日添加时，命中次数较高者优先。',
             style='Muted.TLabel',
         ).pack(anchor='w')
         ttk.Label(

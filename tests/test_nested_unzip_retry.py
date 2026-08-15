@@ -364,6 +364,38 @@ class NestedUnzipRetryTests(unittest.TestCase):
             self.assertEqual(timeline.get_current_record().ops, 'find_zip')
             self.assertEqual(timeline.get_current_record().output_file.path, inner_path)
 
+    def test_enqueue_nested_does_not_resume_successful_deleted_inner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer_path = os.path.join(tmp, 'album.zip')
+            work_root = os.path.join(tmp, 'album')
+            extracted_root = os.path.join(work_root, 'inner')
+            os.makedirs(extracted_root)
+            with open(os.path.join(extracted_root, 'track.wav'), 'wb') as fh:
+                fh.write(b'RIFF')
+
+            volumes = [
+                os.path.join(work_root, f'inner.7z.{part:03d}')
+                for part in range(1, 4)
+            ]
+            inner = Zip(volumes[0], ['secret'], True, volumes=volumes)
+            outer = Zip(outer_path, [], False)
+            timeline = Timeline(Archive(outer_path), 'find_zip', outer)
+            timeline.add_record(Record(outer, 'unzip', Archive(work_root)))
+            timeline.add_record(Record(Archive(work_root), 'find_zip', inner))
+            timeline.add_record(Record(inner, 'unzip', Archive(extracted_root)))
+            timeline.add_record(Record(Archive(extracted_root), 'unnest', Archive(work_root)))
+            task_runner._register_work_root(work_root)
+
+            # 模拟“解压后删除源分卷”以及运行时注册表意外丢失；时间线中的
+            # 成功 unzip 记录本身仍足以证明该内层不应再次入队。
+            archive_registry.clear()
+            task_runner.unzipper.find_zip.return_value = False
+
+            task_runner._enqueue_nested_archives(timeline, work_root, inner)
+
+            self.assertEqual(timeline.get_current_record().ops, 'unnest')
+            task_runner.logger.warning.assert_called_once()
+
     def test_inner_recognized_without_work_root_registry(self):
         """未登记 work_root 时，也应把作品目录内的压缩包识别为内层。"""
         with tempfile.TemporaryDirectory() as tmp:

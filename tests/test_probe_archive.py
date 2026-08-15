@@ -126,6 +126,34 @@ class ProbeArchiveExeTest(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class ProbeArchiveOoxmlTest(unittest.TestCase):
+
+    @staticmethod
+    def _write_docx(path: str) -> None:
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('[Content_Types].xml', b'<Types/>')
+            zf.writestr('_rels/.rels', b'<Relationships/>')
+            zf.writestr('word/document.xml', b'<document/>')
+
+    def test_valid_docx_is_not_archive_candidate(self):
+        with tempfile.TemporaryDirectory(prefix='probe_docx_') as tmp:
+            path = os.path.join(tmp, '台本.docx')
+            self._write_docx(path)
+
+            self.assertFalse(probe_archive(path, nested=False).is_candidate)
+            self.assertFalse(probe_archive(path, nested=True).is_candidate)
+
+    def test_regular_zip_renamed_to_docx_remains_candidate(self):
+        with tempfile.TemporaryDirectory(prefix='probe_docx_') as tmp:
+            path = os.path.join(tmp, '伪装.docx')
+            with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('payload/audio.wav', b'audio')
+
+            probe = probe_archive(path, nested=True)
+            self.assertTrue(probe.is_candidate)
+            self.assertEqual(probe.format_type, 'zip')
+
+
 class ProbeArchiveMp4StegoTest(unittest.TestCase):
 
     def _tmpdir(self) -> str:

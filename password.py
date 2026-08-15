@@ -18,33 +18,31 @@ class Password:
         self.last_hit_date = str(datetime.datetime.now().date())
 
 
-def sort_passwords(passwords: list, last_hit_weight: float) -> list:
+def sort_passwords(passwords: list, last_hit_weight: float = 0.5) -> list:
     """
-    按命中次数和最后命中日期排序密码列表
+    按添加日期和命中次数排序密码列表。
+
+    最近添加的密码优先；添加日期相同时，命中次数更高的优先。
     
     Args:
         passwords: Password对象列表
-        last_hit_weight: 最后命中日期权重
+        last_hit_weight: 为兼容旧调用保留，不再参与排序
         
     Returns:
         排序后的Password列表
     """
-    now = datetime.datetime.now().date()
+    def get_add_date(pwd: Password) -> datetime.date:
+        try:
+            return datetime.datetime.strptime(pwd.add_date, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            # 旧密码库中的非法日期不应被当作新密码优先尝试。
+            return datetime.date.min
 
-    def get_score(pwd: Password) -> float:
-        # 基础分为命中次数
-        score = pwd.hit_count
-
-        # 如果有最后命中日期,计算距今天数并加权
-        if pwd.last_hit_date:
-            str_hit = datetime.datetime.strptime(pwd.last_hit_date, "%Y-%m-%d").date()
-            days = (now - str_hit).days
-            score /= 1 + days * last_hit_weight
-
-        return score
-
-    # 按得分从高到低排序
-    return sorted(passwords, key=get_score, reverse=True)
+    return sorted(
+        passwords,
+        key=lambda pwd: (get_add_date(pwd), pwd.hit_count),
+        reverse=True,
+    )
 
 
 def read_password(path: str = PASSWORD_PATH):

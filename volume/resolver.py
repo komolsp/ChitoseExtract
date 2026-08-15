@@ -9,6 +9,7 @@ from volume import collect, normalize, parse, score, stem_index
 _PIPELINE = (
     (collect.collect_cross_stem_7z_split, normalize.normalize_disguised_split),
     (collect.collect_cross_stem_disguised, normalize.normalize_disguised_split),
+    (collect.collect_disguised_classic_zip, normalize.normalize_disguised_classic_zip),
     (stem_index.collect_by_stem, normalize.normalize_disguised_split),
     (collect.collect_trailing_numeric, normalize.normalize_disguised_split),
     (collect.collect_disguised_split, normalize.normalize_disguised_split),

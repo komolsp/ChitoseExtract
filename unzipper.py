@@ -163,6 +163,7 @@ class Unzipper():
         compress = zip.path
         is_volume = len(zip.volumes or []) > 1 or file_ops.is_volume_zip(compress)
         strategies = self._namelist_strategies(zip, is_volume)
+        original_passwords = list(zip.pw_list)
 
         if zip.file_list and zip.pw_list:
             password = zip.pw_list[0]
@@ -185,10 +186,13 @@ class Unzipper():
                 if namelist:
                     if self._reject_covered_namelist(zip, covered):
                         continue
-                    zip.pw_list = [password]
                     zip.compression_ratio_info = info
                     zip.covered = covered
                     zip.format_type = format_type
+                    if self._namelist_password_needs_extract_confirmation(zip):
+                        zip.pw_list = original_passwords
+                    else:
+                        zip.pw_list = [password]
                     zip.mark_namelist_scanned(password)
                     return True
             zip.invalidate_namelist_scan()
@@ -213,11 +217,14 @@ class Unzipper():
                 if namelist:
                     if self._reject_covered_namelist(zip, covered):
                         continue
-                    zip.pw_list = [password]
                     zip.file_list = list(set(namelist))
                     zip.compression_ratio_info = info
                     zip.covered = covered
                     zip.format_type = format_type
+                    if self._namelist_password_needs_extract_confirmation(zip):
+                        zip.pw_list = original_passwords
+                    else:
+                        zip.pw_list = [password]
                     zip.mark_namelist_scanned(password)
                     return True
         return False
@@ -241,9 +248,6 @@ class Unzipper():
             total = 1
         current = min(max(current, 0), total)
         self.resource.log_queue.put(('unzip', f'解压中 {current}/{total}'))
-        ui = self.progress_ui
-        if ui is not None and hasattr(ui, 'update_progress'):
-            ui.update_progress(current, total, f'解压中 {current}/{total}')
 
     def _will_use_single_operation_unzip(self, zip: Zip, size: float,
                                          thread_threshold_mb: float,
@@ -647,7 +651,16 @@ class Unzipper():
             return None
 
         if zip.is_namelist_current():
-            password_candidates = [zip.verified_password()]
+            verified = zip.verified_password()
+            if self._namelist_password_needs_extract_confirmation(zip):
+                password_candidates = self._unzip_password_candidates(zip)
+                if verified in password_candidates:
+                    password_candidates = [verified] + [
+                        password for password in password_candidates
+                        if password != verified
+                    ]
+            else:
+                password_candidates = [verified]
         else:
             password_candidates = list(zip.pw_list)
 
@@ -691,6 +704,18 @@ class Unzipper():
                     )
                 )
                 return self.password_collision(zip, output_path)
+
+    @staticmethod
+    def _namelist_password_needs_extract_confirmation(zip: Zip) -> bool:
+        """ZIP 的目录通常无需密码即可读取，不能据此锁死密码候选。"""
+        extension = (zip.extension or os.path.splitext(zip.path)[1]).lower()
+        if extension == '.zip' or zip.format_type == 'zip':
+            return True
+        return any(
+            re.search(r'\.zip\.\d{3}$', os.path.basename(path), re.IGNORECASE)
+            for path in (zip.volumes or [zip.path])
+            if path
+        )
 
     def multi_threaded_unzip(self, zip: Zip, output_path):
         list_id = Prefix.UNZIP.value + zip.name

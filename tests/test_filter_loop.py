@@ -37,6 +37,7 @@ class FilterLoopTests(unittest.TestCase):
                 handle.write(b'PK')
 
             task_runner.conf.output_path = output
+            task_runner.conf.recycle_path = os.path.join(tmp, 'recycle')
             task_runner._work_roots.add(work)
 
             main = Timeline(Archive(work), 'unnest', Archive(work))
@@ -68,6 +69,7 @@ class FilterLoopTests(unittest.TestCase):
                 handle.write(b'RIFF')
 
             task_runner.conf.output_path = output
+            task_runner.conf.recycle_path = os.path.join(tmp, 'recycle')
             task_runner._work_roots.add(work)
 
             archive = Archive(work)
@@ -92,6 +94,42 @@ class FilterLoopTests(unittest.TestCase):
                 os.path.basename(timeline.get_current_path()),
                 'ok.wav',
             )) or os.path.isfile(os.path.join(timeline.get_current_path(), 'ok.wav')))
+
+    def test_filter_delete_failure_is_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, 'output')
+            work = os.path.join(output, 'RJ01330941')
+            nose = os.path.join(work, 'SEなし')
+            os.makedirs(nose)
+            with open(os.path.join(nose, 'a.wav'), 'wb') as handle:
+                handle.write(b'RIFF')
+
+            task_runner.conf.output_path = output
+            task_runner.conf.recycle_path = os.path.join(tmp, 'recycle')
+            task_runner._work_roots.add(work)
+            timeline = Timeline(Archive(work), 'unnest', Archive(work))
+            task_runner.timelines[:] = [timeline]
+
+            with mock.patch.object(task_runner, 'delete_file', return_value=False):
+                task_runner.filter_loop()
+
+            self.assertEqual(timeline.get_current_record().ops, 'filter_failed')
+
+            def mark_success(current):
+                task_runner._append_step_record(current, 'post_filter')
+                return work
+
+            with mock.patch.object(
+                task_runner, 'insert_rj', return_value=work,
+            ), mock.patch.object(
+                task_runner, '_should_apply_content_filter', return_value=True,
+            ), mock.patch.object(
+                task_runner, 'post_filter', side_effect=mark_success,
+            ) as retry:
+                task_runner.filter_loop()
+
+            retry.assert_called_once_with(timeline)
+            self.assertEqual(timeline.get_current_record().ops, 'post_filter')
 
 
 if __name__ == '__main__':

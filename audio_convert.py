@@ -303,9 +303,18 @@ def convert_to_flac(
 
         if not ok:
             return None
+        # 临时文件与目标文件位于同一目录，先原子提交转换结果。提交失败时源文件
+        # 仍然存在，finally 只会清理未提交的临时文件，不会造成源、目标双丢失。
+        os.replace(temp_path, target)
         if delete_source:
-            os.remove(source)
-        shutil.move(temp_path, target)
+            try:
+                os.remove(source)
+            except OSError as err:
+                if log:
+                    log(
+                        '转换已完成，但删除源文件失败，已保留源文件：'
+                        f'"{os.path.normpath(source)}"：{err}'
+                    )
         if log:
             log(f'已转换："{os.path.normpath(source)}" -> "{os.path.normpath(target)}"')
         return target
