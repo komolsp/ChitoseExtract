@@ -191,12 +191,19 @@ if __name__ == '__main__':
         # 任务队列容量与并行解压进程数对齐，避免 submit 频繁阻塞
         resource = unzip_process_pool.ProcessResourceManager(conf.max_thread)
 
-        task_runner.logger = logger
-        task_runner.conf = conf
-        task_runner.passwords = passwords
-        task_runner.unzipper = unzipper.Unzipper(logger, resource, seven_z_mmt=conf.seven_z_mmt)
-        task_runner.filter = filter.Filter(conf.filter_kw, conf.filter_dir, logger)
-        task_runner.renamer = dlrenamer.ez_client.ensure_client(conf.renamer_config)
+        unzip_service = unzipper.Unzipper(
+            logger, resource, seven_z_mmt=conf.seven_z_mmt,
+        )
+        filter_service = filter.Filter(conf.filter_kw, conf.filter_dir, logger)
+        rename_service = dlrenamer.ez_client.ensure_client(conf.renamer_config)
+        task_runner.bind_runtime_services(
+            logger_service=logger,
+            configuration=conf,
+            password_list=passwords,
+            unzip_service=unzip_service,
+            filter_service=filter_service,
+            rename_service=rename_service,
+        )
 
         gui.init_ui(resource.log_queue)
 

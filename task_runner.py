@@ -22,23 +22,73 @@ from file_ops import mk_if_not_exit, logger
 from timeline import Timeline, Archive, Record, extend
 from zip import Zip
 from renamer import RenameDuplicateError
+from workflow_context import WorkflowContext
 
-logger = None
-conf = None
-passwords = None
-unzipper = None
-filter = None
-renamer = None
-progress_ui = "not initialized"
-already_add = []
-timelines = []
+workflow_context = WorkflowContext()
+logger = workflow_context.services.logger
+conf = workflow_context.services.conf
+passwords = workflow_context.services.passwords
+unzipper = workflow_context.services.unzipper
+filter = workflow_context.services.filter_service
+renamer = workflow_context.services.renamer
+progress_ui = workflow_context.services.progress_ui
+already_add = workflow_context.state.already_add
+timelines = workflow_context.state.timelines
 
 # 顶层压缩包「就地解压」产生的作品工作目录集合（保留原始大小写）。
 # 用于让整个流程识别出音声库之外的临时工作目录边界：先在原地解压识别，
 # 识别到 RJ 后再移入音声库，未识别则移入资源库，避免跨盘识别+跨盘转资源库。
-_work_roots: set[str] = set()
+_work_roots = workflow_context.state.work_roots
 # 暂存工作目录 → 移入库时应使用的文件夹名（无后缀压缩包与源文件同名时）
-_work_root_preferred_names: dict[str, str] = {}
+_work_root_preferred_names = workflow_context.state.work_root_preferred_names
+
+_RUNTIME_UNSET = object()
+
+
+def _sync_context_services() -> WorkflowContext:
+    services = workflow_context.services
+    services.logger = logger
+    services.conf = conf
+    services.passwords = passwords
+    services.unzipper = unzipper
+    services.filter_service = filter
+    services.renamer = renamer
+    services.progress_ui = progress_ui
+    return workflow_context
+
+
+def bind_runtime_services(
+    *,
+    logger_service=_RUNTIME_UNSET,
+    configuration=_RUNTIME_UNSET,
+    password_list=_RUNTIME_UNSET,
+    unzip_service=_RUNTIME_UNSET,
+    filter_service=_RUNTIME_UNSET,
+    rename_service=_RUNTIME_UNSET,
+    progress_service=_RUNTIME_UNSET,
+) -> WorkflowContext:
+    """统一绑定运行时依赖；保留模块级变量供旧调用与测试兼容。"""
+    global logger, conf, passwords, unzipper, filter, renamer, progress_ui
+    if logger_service is not _RUNTIME_UNSET:
+        logger = logger_service
+    if configuration is not _RUNTIME_UNSET:
+        conf = configuration
+    if password_list is not _RUNTIME_UNSET:
+        passwords = password_list
+    if unzip_service is not _RUNTIME_UNSET:
+        unzipper = unzip_service
+    if filter_service is not _RUNTIME_UNSET:
+        filter = filter_service
+    if rename_service is not _RUNTIME_UNSET:
+        renamer = rename_service
+    if progress_service is not _RUNTIME_UNSET:
+        progress_ui = progress_service
+    return _sync_context_services()
+
+
+def get_workflow_context() -> WorkflowContext:
+    """返回与兼容模块变量同步后的上下文。"""
+    return _sync_context_services()
 
 # 内层/更深层扫描时，累计到此数量的「疑似压缩包但打不开」文件后，
 # 直接停止继续探测（视为解压成功），避免逐个起 7-Zip 子进程拖慢整体性能。
@@ -537,13 +587,7 @@ def _filter_already_extracted_archives(
 
 def _is_registered_work_root(path: str | None) -> bool:
     """返回路径是否是流程已确认的精确作品根目录。"""
-    if not path:
-        return False
-    key = os.path.normcase(os.path.normpath(path))
-    return any(
-        os.path.normcase(os.path.normpath(root)) == key
-        for root in _work_roots
-    )
+    return workflow_context.state.is_work_root_registered(path)
 
 
 def _register_work_root(path: str, *, trusted: bool = False):
@@ -561,7 +605,7 @@ def _register_work_root(path: str, *, trusted: bool = False):
                 '拒绝登记过宽的工作目录（避免整夹重命名上层文件夹）："{}"'.format(norm)
             )
         return
-    _work_roots.add(norm)
+    workflow_context.state.register_work_root(norm)
 
 
 def _register_work_root_preferred_name(work_root: str, preferred_basename: str):
@@ -573,12 +617,14 @@ def _register_work_root_preferred_name(work_root: str, preferred_basename: str):
             or not _is_container_or_library_root(work_root)
         )
     ):
-        _work_root_preferred_names[os.path.normpath(work_root)] = preferred_basename
+        workflow_context.state.set_preferred_work_root_name(
+            work_root, preferred_basename,
+        )
 
 
 def _preferred_work_root_basename(work_path: str) -> str:
     work_norm = os.path.normpath(work_path)
-    preferred = _work_root_preferred_names.get(work_norm)
+    preferred = workflow_context.state.preferred_work_root_name(work_norm)
     if preferred:
         return preferred
     return os.path.basename(work_norm.rstrip(' \\'))
@@ -715,9 +761,7 @@ def _remap_path_under_root(path: str, old_root: str, new_root: str) -> str:
 
 
 def _unregister_work_root(path: str):
-    norm = os.path.normpath(path)
-    _work_roots.discard(norm)
-    _work_root_preferred_names.pop(norm, None)
+    workflow_context.state.unregister_work_root(path)
 
 
 def _remap_work_root(old_root: str, new_root: str):
@@ -726,11 +770,7 @@ def _remap_work_root(old_root: str, new_root: str):
     new_norm = os.path.normpath(new_root)
     if os.path.normcase(old_norm) == os.path.normcase(new_norm):
         return
-    if old_norm in _work_roots:
-        _work_roots.discard(old_norm)
-    _work_roots.add(new_norm)
-    if old_norm in _work_root_preferred_names:
-        _work_root_preferred_names[new_norm] = _work_root_preferred_names.pop(old_norm)
+    workflow_context.state.remap_work_root(old_norm, new_norm)
     for timeline in timelines:
         for record in timeline.records:
             for archive in (record.input_file, record.output_file):
@@ -964,7 +1004,6 @@ def _pending_unzip_under_work_root(work_root: str | None) -> bool:
 
 def _prune_successful_timelines(step: str, *, succeeded_roots: set[str] | None = None):
     """移除本步骤已成功的时间线；失败或未完成则保留。"""
-    global timelines
     remaining = []
     for timeline in timelines:
         if _timeline_step_succeeded(timeline, step):
@@ -2435,7 +2474,6 @@ def _prune_companion_timelines(completed_roots: set[str]):
     """移除与已完成作品同目录、但停在中间步骤的套娃影子任务。"""
     if not completed_roots:
         return
-    global timelines
     remaining = []
     for timeline in timelines:
         if _timeline_step_failed(timeline):
@@ -3443,10 +3481,7 @@ def delete_file(file_path) -> bool:  # 删除方法，若配置逻辑删除则�
 
 
 def clear():
-    timelines.clear()
-    _work_roots.clear()
-    _work_root_preferred_names.clear()
-    already_add.clear()
+    workflow_context.state.clear()
     archive_registry.clear()
 
 
@@ -3482,27 +3517,31 @@ def _discard_wrapper_dir(dir_path: str):
 
 
 def reload():
-    global conf
-    conf = config.Config()
+    new_conf = config.Config()
     file_ops.set_discard_dir_path_hook(_discard_wrapper_dir)
     file_ops.set_delete_path_hook(delete_file)
-    global passwords
-    passwords = password.read_password()
-    global filter
-    filter = filter_module.Filter(conf.filter_kw, conf.filter_dir, logger)
-    global renamer
-    renamer = dlrenamer.ez_client.ensure_client(conf.renamer_config)
+    new_passwords = password.read_password()
+    new_filter = filter_module.Filter(
+        new_conf.filter_kw, new_conf.filter_dir, logger,
+    )
+    new_renamer = dlrenamer.ez_client.ensure_client(new_conf.renamer_config)
+    bind_runtime_services(
+        configuration=new_conf,
+        password_list=new_passwords,
+        filter_service=new_filter,
+        rename_service=new_renamer,
+    )
     if unzipper is not None:
-        unzipper.set_seven_z_mmt(conf.seven_z_mmt)
+        unzipper.set_seven_z_mmt(new_conf.seven_z_mmt)
 
 
 def reload_passwords(password_list: list | None = None):
     """重新加载密码库，并同步到待解压/解压失败任务的 pw_list。"""
-    global passwords
     if password_list is None:
-        passwords = password.read_password()
+        new_passwords = password.read_password()
     else:
-        passwords = password_list
+        new_passwords = password_list
+    bind_runtime_services(password_list=new_passwords)
     str_passwords = password.get_str_passwords(password.sort_passwords(passwords))
     for timeline in timelines:
         record = timeline.get_current_record()

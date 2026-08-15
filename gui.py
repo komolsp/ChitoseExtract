@@ -19,6 +19,7 @@ from ui_scaling import logical_to_pixels
 
 import task_runner
 from zip import Zip
+from workflow_orchestrator import WorkflowOrchestrator
 
 UI = None
 Window = None
@@ -382,6 +383,9 @@ class Console(ttk.Frame):
         self._task_tree_refresh_lock = threading.Lock()
         self._pending_task_tree_refresh: tuple[list, bool] | None = None
         self._task_tree_refresh_scheduled = False
+        self._workflow_orchestrator = WorkflowOrchestrator(
+            task_runner, config.build_run_pipeline,
+        )
         self._worker_busy = False
         self._worker_interrupted = False
         self._worker_last_step = None
@@ -1004,30 +1008,24 @@ class Console(ttk.Frame):
         last_process = None
         self._worker_interrupted = False
         self._worker_last_step = None
+
+        def _on_step_start(process, _index, _pipeline):
+            nonlocal last_process
+            last_process = process
+            self._worker_last_step = process
+            self.set_step_status(process)
+
+        def _on_step_complete(_process, next_process):
+            if next_process:
+                self._run_on_ui(lambda p=next_process: self.val.set(p))
+
         try:
-            task_runner.reload()
-            pipeline = config.build_run_pipeline(
+            result = self._workflow_orchestrator.run(
                 start_process,
-                auto_next=bool(task_runner.conf.auto_next),
-                workflow_steps=getattr(task_runner.conf, 'workflow_steps', None),
+                on_step_start=_on_step_start,
+                on_step_complete=_on_step_complete,
             )
-            if not pipeline:
-                pipeline = [start_process]
-            for index, process in enumerate(pipeline):
-                last_process = process
-                self._worker_last_step = process
-                self.set_step_status(process)
-                getattr(task_runner, f'{process}_loop')()
-                if index < len(pipeline) - 1:
-                    next_process = pipeline[index + 1]
-                    self._run_on_ui(lambda p=next_process: self.val.set(p))
-            ran_full_from_unzip = (
-                start_process == 'unzip'
-                and bool(task_runner.conf.auto_next)
-                and len(pipeline) > 1
-            )
-            if last_process:
-                task_runner.prune_after_step(last_process)
+            ran_full_from_unzip = result.ran_full_from_unzip
         except Exception:
             self._worker_interrupted = True
             app_paths.append_startup_error_log('dash worker crash')
@@ -1213,7 +1211,7 @@ def init_ui(log_queue):
     UI = console
     global Window
     Window = window
-    task_runner.progress_ui = console
+    task_runner.bind_runtime_services(progress_service=console)
     if task_runner.unzipper is not None:
         task_runner.unzipper.progress_ui = console
     console.bind_log_queue(log_queue)
