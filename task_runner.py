@@ -36,6 +36,7 @@ from unzip_executor import (
     UnzipExecutor,
     unzip_task_priority as executor_unzip_task_priority,
 )
+from unzip_task_processor import UnzipTaskDependencies, UnzipTaskProcessor
 
 workflow_context = WorkflowContext()
 logger = workflow_context.services.logger
@@ -49,6 +50,7 @@ already_add = workflow_context.state.already_add
 timelines = workflow_context.state.timelines
 _queue_scanner = QueueScanner(workflow_context.state)
 _unzip_executor = UnzipExecutor(workflow_context.state)
+_unzip_task_processor = UnzipTaskProcessor()
 
 # 顶层压缩包「就地解压」产生的作品工作目录集合（保留原始大小写）。
 # 用于让整个流程识别出音声库之外的临时工作目录边界：先在原地解压识别，
@@ -1684,126 +1686,37 @@ def _timeline_has_unzipped_ancestor(timeline: Timeline, zip_obj: Zip) -> bool:
 
 
 def _process_unzip_timeline(timeline: Timeline):
-    record = timeline.get_current_record()
-    zip_obj = record.output_file
-    parent_zip = zip_obj if isinstance(zip_obj, Zip) else None
-
-    if isinstance(zip_obj, Zip) and not _is_nested_archive(zip_obj):
-        reextract = _timeline_requests_reextract(timeline, zip_obj)
-        work_root = _resolve_extracted_work_root(zip_obj)
-        if (
-            not reextract
-            and work_root
-            and _has_extracted_content(work_root)
-            and (
-                _should_resume_nested_only(zip_obj)
-                or archive_registry.is_unzipped(zip_obj.path, zip_obj.volumes)
-            )
-        ):
-            archive_registry.mark_unzipped(zip_obj.path, zip_obj.volumes)
-            if logger:
-                logger.info(
-                    '外层已解压，跳过重复解压并处理内层："{}"'.format(
-                        os.path.normpath(zip_obj.path or ''),
-                    ),
-                )
-            new_path = work_root
-            if file_ops.is_dir_path(new_path):
-                _register_work_root(new_path)
-                new_path = _flatten_work_root(new_path)
-            _enqueue_nested_archives(timeline, new_path, zip_obj)
-            if _timeline_targets_outer_zip(timeline):
-                if not _promote_outer_timeline_to_inner(timeline):
-                    _advance_past_outer_layer(timeline, zip_obj, work_root)
-            return
-
-    if isinstance(zip_obj, Zip) and _is_nested_archive(zip_obj) and _timeline_has_unzipped_ancestor(timeline, zip_obj):
-        if logger:
-            logger.info(
-                '套娃内层重试，跳过外层："{}"'.format(
-                    os.path.normpath(zip_obj.path or ''),
-                ),
-            )
-    if (
-        not _timeline_requests_reextract(timeline, zip_obj)
-        and isinstance(zip_obj, Zip)
-        and archive_registry.is_unzipped(zip_obj.path, zip_obj.volumes)
-    ):
-        if logger:
-            logger.info(
-                '压缩包已解压过，跳过重复解压："{}"'.format(
-                    os.path.normpath(zip_obj.path or ''),
-                )
-            )
-        new_path = unnest(timeline) or timeline.get_current_path()
-        _enqueue_nested_archives(timeline, new_path, parent_zip)
-        return
-
-    pre_filter(timeline)
-    # 必须在 unzip() 执行前捕获引用：Timeline_AOP 会在成功后把 output_file
-    # 替换成普通 Archive，届时再取只能拿到失去 pw_list 的对象，导致密码永远无法继承。
-    # unzipper.unzip() 会原地把命中的密码写回同一个 Zip 对象的 pw_list[0]。
-    active_zip = _timeline_pending_zip(timeline)
-    parent_zip = timeline.get_current_record().output_file
-    incremental_base = None
-    incremental_before = None
-    if isinstance(parent_zip, Zip):
-        source = timeline.records[0].input_file.path if timeline.records else None
-        _refresh_zip_volumes(parent_zip, source)
-        _prepare_zip_for_unzip(parent_zip)
-        # 仅套娃内层使用增量扫描。顶层、用户目录和恢复流程仍保持全量扫描，
-        # 避免改变标准压缩包及历史任务的发现语义。
-        if _is_nested_archive(parent_zip):
-            incremental_base = _resolve_work_root_containing(parent_zip.path)
-            if incremental_base and os.path.isdir(incremental_base):
-                incremental_before = _snapshot_scan_tree(incremental_base)
-    if _skip_duplicate_volume_unzip(timeline):
-        output_path = timeline.get_current_record().output_file.path
-    else:
-        output_path = unzip(timeline)
-    if not output_path:
-        failed_zip = active_zip if isinstance(active_zip, Zip) else timeline.get_current_record().output_file
-        if isinstance(failed_zip, Zip) and _recover_outer_with_pending_inner(timeline, failed_zip):
-            return
-        if isinstance(failed_zip, Zip):
-            timeline.add_record(Record(failed_zip, 'unzip_failed', failed_zip))
-            if logger:
-                label = '内层' if _is_nested_archive(failed_zip) else '压缩包'
-                logger.error(
-                    '{}解压失败，跳过套娃继续: "{}"'.format(
-                        label,
-                        os.path.normpath(failed_zip.path or ''),
-                    ),
-                )
-        return
-    if isinstance(parent_zip, Zip):
-        _remember_unzipped_archive(parent_zip)
-        source = timeline.records[0].input_file.path if timeline.records else None
-        _dismiss_volume_sibling_failures(parent_zip, source)
-    new_path = unnest(timeline)
-    if not new_path:
-        new_path = timeline.get_current_path()
-    if new_path and file_ops.is_dir_path(new_path):
-        _register_work_root(new_path)
-    incremental_roots = None
-    if (
-        incremental_base
-        and new_path
-        and os.path.normcase(os.path.normpath(incremental_base))
-        == os.path.normcase(os.path.normpath(new_path))
-    ):
-        incremental_roots = _incremental_scan_roots(
-            incremental_base, incremental_before,
-        )
-        if logger and incremental_roots is not None:
-            logger.debug(
-                '套娃增量扫描：{} 个新增根 [{}]'.format(
-                    len(incremental_roots),
-                    '],['.join(incremental_roots),
-                ),
-            )
-    _enqueue_nested_archives(
-        timeline, new_path, parent_zip, incremental_roots=incremental_roots,
+    return _unzip_task_processor.process(
+        timeline,
+        UnzipTaskDependencies(
+            archive_registry=archive_registry,
+            is_nested_archive=_is_nested_archive,
+            requests_reextract=_timeline_requests_reextract,
+            resolve_extracted_work_root=_resolve_extracted_work_root,
+            has_extracted_content=_has_extracted_content,
+            should_resume_nested_only=_should_resume_nested_only,
+            register_work_root=_register_work_root,
+            flatten_work_root=_flatten_work_root,
+            enqueue_nested_archives=_enqueue_nested_archives,
+            timeline_targets_outer_zip=_timeline_targets_outer_zip,
+            promote_outer_timeline_to_inner=_promote_outer_timeline_to_inner,
+            advance_past_outer_layer=_advance_past_outer_layer,
+            timeline_has_unzipped_ancestor=_timeline_has_unzipped_ancestor,
+            unnest=unnest,
+            pre_filter=pre_filter,
+            pending_zip=_timeline_pending_zip,
+            refresh_zip_volumes=_refresh_zip_volumes,
+            prepare_zip_for_unzip=_prepare_zip_for_unzip,
+            resolve_work_root_containing=_resolve_work_root_containing,
+            snapshot_scan_tree=_snapshot_scan_tree,
+            skip_duplicate_volume_unzip=_skip_duplicate_volume_unzip,
+            unzip=unzip,
+            recover_outer_with_pending_inner=_recover_outer_with_pending_inner,
+            remember_unzipped_archive=_remember_unzipped_archive,
+            dismiss_volume_sibling_failures=_dismiss_volume_sibling_failures,
+            incremental_scan_roots=_incremental_scan_roots,
+            logger=logger,
+        ),
     )
 
 
