@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from volume import parse, resolve_volume_archives
 from volume.resolver import VolumeResolver, clear_index_cache
@@ -144,6 +145,72 @@ class VolumeResolveTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(z01))
             self.assertTrue(os.path.isfile(z02))
             self.assertTrue(os.path.isfile(main_zip))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_classic_zip_with_disguised_main_restores_only_main_name(self):
+        d = self._tmpdir()
+        try:
+            z01 = os.path.join(d, 'RJ01593274.z01')
+            z02 = os.path.join(d, 'RJ01593274.z02')
+            disguised_main = os.path.join(d, 'RJ01593274.zip删')
+            with open(z01, 'wb') as stream:
+                stream.write(b'PK\x07\x08PK\x03\x04' + b'\x00' * 64)
+            with open(z02, 'wb') as stream:
+                stream.write(b'\x00' * 64)
+            with open(disguised_main, 'wb') as stream:
+                stream.write(b'\x00' * 64)
+
+            peeked = VolumeResolver.peek_volumes(z02)
+            self.assertEqual(
+                [os.path.basename(path) for path in peeked],
+                ['RJ01593274.zip删', 'RJ01593274.z01', 'RJ01593274.z02'],
+            )
+
+            volumes = resolve_volume_archives(z02)
+            self.assertEqual(
+                [os.path.basename(path) for path in volumes],
+                ['RJ01593274.zip', 'RJ01593274.z01', 'RJ01593274.z02'],
+            )
+            self.assertFalse(os.path.exists(disguised_main))
+            self.assertTrue(all(os.path.isfile(path) for path in volumes))
+
+            from volume.rename import restore_renamed_volumes
+            restored = restore_renamed_volumes(volumes)
+            self.assertEqual(
+                [os.path.basename(path) for path in restored],
+                ['RJ01593274.zip删', 'RJ01593274.z01', 'RJ01593274.z02'],
+            )
+            self.assertTrue(os.path.isfile(disguised_main))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_find_zip_queues_classic_zip_with_disguised_main(self):
+        from unzipper import Unzipper
+
+        d = self._tmpdir()
+        try:
+            for name, data in (
+                ('RJ01593274.z01', b'PK\x07\x08PK\x03\x04' + b'\x00' * 64),
+                ('RJ01593274.z02', b'\x00' * 64),
+                ('RJ01593274.zip删', b'\x00' * 64),
+            ):
+                with open(os.path.join(d, name), 'wb') as stream:
+                    stream.write(data)
+            unzipper = Unzipper.__new__(Unzipper)
+            unzipper.logger = mock.MagicMock()
+            unzipper.load_namelist = mock.MagicMock(return_value=True)
+            zip_list = []
+
+            found = unzipper.find_zip(d, [''], False, [], zip_list)
+
+            self.assertTrue(found)
+            self.assertEqual(len(zip_list), 1)
+            self.assertEqual(os.path.basename(zip_list[0].path), 'RJ01593274.zip')
+            self.assertEqual(
+                [os.path.basename(path) for path in zip_list[0].volumes],
+                ['RJ01593274.zip', 'RJ01593274.z01', 'RJ01593274.z02'],
+            )
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

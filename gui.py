@@ -222,6 +222,10 @@ OPS_LABEL = {
     'convert_audio': '已转换',
     'tag_audio': '已写入元数据',
     'unzip_failed': '解压失败',
+    'scan_failed': '未发现可解压文件',
+    'filter_failed': '过滤失败',
+    'convert_audio_failed': '转换失败',
+    'tag_audio_failed': '写入元数据失败',
 }
 
 
@@ -314,6 +318,13 @@ def _format_run_status_summary(
     if interrupted and last_step == 'unzip':
         return '解压已中断', detail, ''
 
+    scan_failed = counts.get('未发现可解压文件', 0)
+    if scan_failed and scan_failed == len(timelines):
+        suffix = '请检查分卷是否完整或文件名是否被改动'
+        return '未发现可解压文件', suffix, ''
+    if scan_failed:
+        return '部分完成', detail, ''
+
     failed = counts.get('解压失败', 0)
     if failed and failed == len(timelines):
         suffix = f'{failed} 个任务待重试' if failed > 1 else '1 个任务待重试'
@@ -325,6 +336,12 @@ def _format_run_status_summary(
     duplicate = counts.get('库中有重复', 0)
     if duplicate:
         return '库中有重复内容', detail, ''
+
+    if last_step and all(
+        task_runner._timeline_step_succeeded(timeline, last_step)
+        for timeline in timelines
+    ):
+        return '已完成', detail, ''
 
     if len(counts) == 1 and '已完成' in counts:
         return '已完成', detail, ''
@@ -658,7 +675,8 @@ class Console(ttk.Frame):
 
     def _insert_task_row(self, input_text, step_text, output_text, ops: str | None = None):
         count = len(self.task_tree.get_children())
-        tag = 'failed' if ops in ('unzip_failed', 'rename_duplicate') else ('odd' if count % 2 else 'even')
+        failed = ops == 'rename_duplicate' or bool(ops and ops.endswith('_failed'))
+        tag = 'failed' if failed else ('odd' if count % 2 else 'even')
         self.task_tree.insert('', 'end', values=(input_text, step_text, output_text), tags=(tag,))
 
     def write(self, info):

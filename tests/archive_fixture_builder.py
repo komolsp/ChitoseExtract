@@ -115,9 +115,10 @@ def build_plain_archives(work_dir: str) -> dict[str, str]:
         path = os.path.join(work_dir, f'plain{ext}')
         seven_zip_add(path, payload, format_flag=fmt, store_only=True)
         out[ext.lstrip('.')] = path
-    rar_path = os.path.join(work_dir, 'plain.rar')
-    winrar_add(rar_path, payload)
-    out['rar'] = rar_path
+    if winrar_exe():
+        rar_path = os.path.join(work_dir, 'plain.rar')
+        winrar_add(rar_path, payload)
+        out['rar'] = rar_path
     return out
 
 
@@ -131,9 +132,10 @@ def build_password_archives(work_dir: str, password: str = 'testpw') -> dict[str
     seven_path = os.path.join(work_dir, 'locked.7z')
     seven_zip_add(seven_path, payload, password=password, format_flag='7z')
     out['7z'] = seven_path
-    rar_path = os.path.join(work_dir, 'locked.rar')
-    winrar_add(rar_path, payload, password=password)
-    out['rar'] = rar_path
+    if winrar_exe():
+        rar_path = os.path.join(work_dir, 'locked.rar')
+        winrar_add(rar_path, payload, password=password)
+        out['rar'] = rar_path
     return out
 
 
@@ -197,12 +199,14 @@ def build_nested_chain(work_dir: str, layers: list[str]) -> str:
 def build_split_volumes(work_dir: str, stem: str = 'split') -> dict[str, list[str]]:
     """在同一目录生成 zip/7z/rar 三套分卷（测试批量场景用）。"""
     os.makedirs(work_dir, exist_ok=True)
-    payload = write_payload_file(work_dir, 'big.bin', bytes(range(256)) * 8000)
-    return {
+    payload = write_payload_file(work_dir, 'big.bin', bytes(range(256)) * 400)
+    volumes = {
         'zip': _build_zip_volumes(work_dir, stem, payload),
         '7z': _build_7z_volumes(work_dir, stem, payload),
-        'rar': _build_rar_volumes(work_dir, stem, payload),
     }
+    if winrar_exe():
+        volumes['rar'] = _build_rar_volumes(work_dir, stem, payload)
+    return volumes
 
 
 def _build_zip_volumes(work_dir: str, stem: str, payload: str) -> list[str]:
@@ -261,15 +265,16 @@ def build_fixture_tree(base_dir: str) -> dict:
     }
     nested = {
         'zip_7z_zip': build_nested_chain(nested_dir, ['zip', '7z', 'zip']),
-        '7z_rar_zip': build_nested_chain(nested_dir, ['7z', 'rar', 'zip']),
         'zip_zip': build_nested_chain(nested_dir, ['zip', 'zip']),
     }
+    if winrar_exe():
+        nested['7z_rar_zip'] = build_nested_chain(nested_dir, ['7z', 'rar', 'zip'])
     zip_sub = os.path.join(volume_dir, 'zip')
     seven_sub = os.path.join(volume_dir, '7z')
     rar_sub = os.path.join(volume_dir, 'rar')
     for sub in (zip_sub, seven_sub, rar_sub):
         os.makedirs(sub, exist_ok=True)
-    payload_zip = write_payload_file(zip_sub, 'big.bin', bytes(range(256)) * 8000)
+    payload_zip = write_payload_file(zip_sub, 'big.bin', bytes(range(256)) * 400)
     payload_7z = os.path.join(seven_sub, 'big.bin')
     shutil.copy2(payload_zip, payload_7z)
     payload_rar = os.path.join(rar_sub, 'big.bin')
@@ -277,8 +282,9 @@ def build_fixture_tree(base_dir: str) -> dict:
     volumes = {
         'zip': _build_zip_volumes(zip_sub, 'zipvol', payload_zip),
         '7z': _build_7z_volumes(seven_sub, 'sevenvol', payload_7z),
-        'rar': _build_rar_volumes(rar_sub, 'rarvol', payload_rar),
     }
+    if winrar_exe():
+        volumes['rar'] = _build_rar_volumes(rar_sub, 'rarvol', payload_rar)
     return {
         'plain': plain,
         'disguised': disguised,

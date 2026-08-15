@@ -376,6 +376,58 @@ def collect_classic_zip(dirname: str, file_path: str) -> list[str] | None:
     return volumes if len(volumes) >= 2 else None
 
 
+def collect_disguised_classic_zip(dirname: str, file_path: str) -> list[str] | None:
+    """经典 ZIP 分卷的主卷被追加无点后缀：archive.zip删 + archive.z01。"""
+    basename = os.path.basename(file_path)
+    z_match = re.fullmatch(r'(?P<stem>.+)\.z(?P<part>\d{2})', basename, re.IGNORECASE)
+    main_match = re.fullmatch(
+        r'(?P<stem>.+)\.zip(?P<junk>[^.]+)', basename, re.IGNORECASE,
+    )
+    if z_match:
+        stem = z_match.group('stem')
+    elif main_match:
+        stem = main_match.group('stem')
+    else:
+        return None
+
+    try:
+        names = os.listdir(dirname)
+    except OSError:
+        return None
+
+    # 已有标准 .zip 时交给 collect_classic_zip，避免把旁边的备份文件误当主卷。
+    if any(name.casefold() == f'{stem}.zip'.casefold() for name in names):
+        return None
+
+    disguised_mains: list[str] = []
+    main_re = re.compile(rf'^{re.escape(stem)}\.zip[^.]+$', re.IGNORECASE)
+    for name in names:
+        if not main_re.fullmatch(name):
+            continue
+        parsed = parse.parse_disguised_split(name)
+        if not parsed or parsed[0].casefold() != stem.casefold() or parsed[1] != 1:
+            continue
+        path = os.path.join(dirname, name)
+        if os.path.isfile(path):
+            disguised_mains.append(path)
+    if len(disguised_mains) != 1:
+        return None
+
+    z_parts: dict[int, str] = {}
+    z_re = re.compile(rf'^{re.escape(stem)}\.z(?P<part>\d{{2}})$', re.IGNORECASE)
+    for name in names:
+        match = z_re.fullmatch(name)
+        if not match:
+            continue
+        part = int(match.group('part'))
+        if part in z_parts:
+            return None
+        z_parts[part] = os.path.join(dirname, name)
+    if not z_parts or sorted(z_parts) != list(range(1, max(z_parts) + 1)):
+        return None
+    return disguised_mains + [z_parts[part] for part in sorted(z_parts)]
+
+
 def collect_legacy_pattern(dirname: str, file_path: str) -> list[str] | None:
     basename = os.path.basename(file_path)
     pattern_7z = r'(.*)\.\d{3}\b'

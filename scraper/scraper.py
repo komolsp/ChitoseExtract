@@ -180,7 +180,12 @@ class Scraper(object):
         """"
         https://gist.github.com/xflr6/f29ed682f23fd27b6a0b1241f244e6c9
         """
-        with contextlib.closing(requests.get(url, stream=True, proxies=self.__proxies)) as r:
+        with contextlib.closing(requests.get(
+                url,
+                stream=True,
+                proxies=self.__proxies,
+                timeout=(self.__connect_timeout, self.__read_timeout),
+        )) as r:
             r.raise_for_status()
             with open(filename, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8_192):

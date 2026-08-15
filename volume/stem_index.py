@@ -2,7 +2,7 @@
 
 import os
 
-from volume import normalize, parse
+from volume import parse
 
 _PART_PARSERS = (
     parse.parse_rar_oldstyle,
@@ -78,11 +78,3 @@ def collect_by_stem(dirname: str, file_path: str) -> list[str] | None:
     if len(merged) < 2:
         return None
     return [path for _, path in sorted(merged.items())]
-
-
-def collect_stem_cluster(dirname: str, file_path: str) -> list[str] | None:
-    return collect_by_stem(dirname, file_path)
-
-
-def normalize_stem_cluster(dirname: str, volumes: list[str]) -> list[str]:
-    return normalize.normalize_disguised_split(dirname, volumes)

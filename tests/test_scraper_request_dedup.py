@@ -1,10 +1,40 @@
 import unittest
+import os
+import tempfile
+from unittest import mock
 
 from scraper.scraper import Scraper
 from scraper.locale import Locale
 
 
 class TestScraperRequestDedup(unittest.TestCase):
+    def test_cover_download_uses_configured_timeouts(self):
+        response = mock.MagicMock()
+        response.iter_content.return_value = [b'image']
+        response.headers = {'Content-Type': 'image/jpeg'}
+        scraper = Scraper(
+            Locale.zh_cn,
+            proxies={'http': 'http://127.0.0.1:9'},
+            connect_timeout=4,
+            read_timeout=17,
+            sleep_interval=0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            'scraper.scraper.requests.get', return_value=response,
+        ) as request:
+            scraper.urlretrieve(
+                'https://example.test/cover.jpg',
+                os.path.join(tmp, 'cover.jpg'),
+            )
+
+        request.assert_called_once_with(
+            'https://example.test/cover.jpg',
+            stream=True,
+            proxies={'http': 'http://127.0.0.1:9'},
+            timeout=(4, 17),
+        )
+
     def test_single_scrape_deduplicates_api_calls(self):
         store = {
             'RJ01352699': {

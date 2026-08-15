@@ -180,6 +180,22 @@ def _timeline_outer_zip(timeline: Timeline) -> Zip | None:
     return None
 
 
+def _timeline_outer_work_root(
+    timeline: Timeline,
+    current_path: str | None = None,
+) -> str | None:
+    """从时间线中的顶层压缩包恢复作品根，避免套娃子目录覆盖归档边界。"""
+    outer_zip = _timeline_outer_zip(timeline)
+    if not outer_zip:
+        return None
+    work_root = _resolve_extracted_work_root(outer_zip)
+    if not work_root or not file_ops.is_dir_path(work_root):
+        return None
+    if current_path and not file_ops.is_path_under(work_root, current_path):
+        return None
+    return os.path.normpath(work_root)
+
+
 def _zip_path_already_queued(path: str | None) -> bool:
     if not path:
         return False
@@ -390,7 +406,7 @@ def _recover_outer_with_pending_inner(
                 ),
             )
         return False
-    str_passwords = password.get_str_passwords(password.sort_passwords(passwords, 0.5))
+    str_passwords = password.get_str_passwords(password.sort_passwords(passwords))
     inner_list = _scan_inner_archives_in_work_root(work_root, str_passwords, already_add)
     if not inner_list:
         inner_list = _list_pending_archives_in_work_root(work_root, str_passwords)
@@ -1038,10 +1054,15 @@ def _prepare_zip_for_unzip(zip_obj: Zip):
         return
     if zip_obj.requires_manual_password():
         return
+    library = password.get_str_passwords(password.sort_passwords(passwords))
     prior = list(zip_obj.pw_list)
-    library = password.get_str_passwords(password.sort_passwords(passwords, 0.5))
+    verified = zip_obj.verified_password() if zip_obj.is_namelist_current() else ''
     ordered: list[str] = []
-    for pw in prior + library:
+    # 任务备注/RJ 号与已验证密码是针对当前压缩包的明确候选，
+    # 依然优先；其余密码库项严格使用“添加日期、命中次数”顺序。
+    explicit = [verified, zip_obj.note, zip_obj.RJ_code]
+    remaining = [pw for pw in prior if pw not in library]
+    for pw in explicit + library + remaining:
         if pw and pw not in ordered:
             ordered.append(pw)
     changed = ordered != zip_obj.pw_list
@@ -1156,7 +1177,10 @@ def requeue_unzip_failure(timeline: Timeline) -> bool:
     if outer:
         archive_registry.mark_unzipped(outer.path, outer.volumes)
     if isinstance(zip_obj, Zip):
-        _merge_zip_passwords(zip_obj, password.get_str_passwords(passwords))
+        _merge_zip_passwords(
+            zip_obj,
+            password.get_str_passwords(password.sort_passwords(passwords)),
+        )
         _refresh_zip_volumes(zip_obj)
         zip_obj.invalidate_namelist_scan()
     timeline.add_record(Record(record.input_file, 'find_zip', zip_obj))
@@ -1240,14 +1264,17 @@ def prepare_archive_queue():
 
 def scan_work_queue():
     """启动解压前：将工作区拖入项扫描为可解压任务。"""
-    queued = [t for t in timelines if t.get_current_record().ops == 'create_timeline']
+    queued = [
+        t for t in timelines
+        if t.get_current_record().ops in ('create_timeline', 'scan_failed')
+    ]
     if not queued:
         return 0
 
     scan_already_add = _collect_already_add_from_timelines()
     new_timelines: list[Timeline] = []
     removed: list[Timeline] = []
-    str_passwords = password.get_str_passwords(passwords)
+    str_passwords = password.get_str_passwords(password.sort_passwords(passwords))
     claimed_volume_groups: set[tuple[str, ...]] = set()
     claimed_volume_identities: set[tuple] = set()
 
@@ -1268,12 +1295,14 @@ def scan_work_queue():
         unresolved_list[:] = _filter_volume_sibling_unresolved(zip_list, unresolved_list)
         if not zip_list and not unresolved_list:
             if logger:
-                logger.info(
+                logger.warning(
                     '工作区项未发现可处理压缩文件："{}"'.format(
                         os.path.normpath(source),
                     ),
                 )
-            removed.append(timeline)
+            # 扫描失败不能移除最后一条时间线，否则空队列会被 UI 误报为“已完成”。
+            if timeline.get_current_record().ops != 'scan_failed':
+                timeline.add_record(Record(queued_archive, 'scan_failed', queued_archive))
             continue
 
         def _apply_queued_note(zip_obj):
@@ -1361,7 +1390,7 @@ def unzip_loop():
                     )
                     logger.debug(traceback.format_exc())
             progress_ui.add2lis(timelines)
-        password.write_password(password.sort_passwords(passwords, 0.5))
+        password.write_password(password.sort_passwords(passwords))
         # 全部套娃解压完成后再统一拍平，避免内层 zip 尚未解压时过早处理
         # 解压失败的任务仍停留在原压缩包路径（不在音声库内），跳过以避免无意义的告警
         seen_roots = set()
@@ -1555,6 +1584,17 @@ def _resume_inner_from_timeline_records(
 ) -> Zip | None:
     """从时间线历史中取尚未解压成功的内层压缩包。"""
     work_norm = os.path.normcase(os.path.normpath(work_root)) if work_root else None
+    succeeded_paths: set[str] = set()
+    succeeded_identities: set[tuple] = set()
+    for record in timeline.records:
+        if record.ops != 'unzip' or not isinstance(record.input_file, Zip):
+            continue
+        succeeded = record.input_file
+        for path in (succeeded.volumes or [succeeded.path]):
+            if path:
+                succeeded_paths.add(os.path.normcase(os.path.normpath(path)))
+        succeeded_identities.update(_zip_volume_identities(succeeded))
+
     for record in reversed(timeline.records):
         zip_obj = None
         if record.ops in ('unzip_failed', 'find_zip') and isinstance(record.output_file, Zip):
@@ -1566,6 +1606,15 @@ def _resume_inner_from_timeline_records(
             inner_norm = os.path.normcase(os.path.normpath(zip_obj.path))
             is_inner = inner_norm.startswith(work_norm + os.sep) or inner_norm == work_norm
         if not is_inner:
+            continue
+        candidate_paths = {
+            os.path.normcase(os.path.normpath(path))
+            for path in (zip_obj.volumes or [zip_obj.path])
+            if path
+        }
+        if candidate_paths & succeeded_paths:
+            continue
+        if _zip_volume_identities(zip_obj) & succeeded_identities:
             continue
         if not archive_registry.is_unzipped(zip_obj.path, zip_obj.volumes):
             return zip_obj
@@ -1658,7 +1707,7 @@ def _enqueue_nested_archives(
         return
 
     zip_list: list = []
-    nested_passwords = password.get_str_passwords(password.sort_passwords(passwords, 0.5))
+    nested_passwords = password.get_str_passwords(password.sort_passwords(passwords))
     if isinstance(parent_zip, Zip) and parent_zip.pw_list:
         nested_passwords = [
             pw for pw in parent_zip.pw_list if pw
@@ -2248,9 +2297,8 @@ def unzip(timeline: Timeline):
             # 才将暂存目录提升为与压缩包同名的作品文件夹。
             work_root = _legacy_top_work_root(zip)
             if zip.del_after_unzip and os.path.isfile(zip.path):
-                delete_file(zip.path)
-                source_removed = True
-                if not os.path.exists(work_root):
+                source_removed = delete_file(zip.path)
+                if source_removed and not os.path.exists(work_root):
                     shutil.move(output_path, work_root)
                     _remap_work_root(output_path, work_root)
                     output_path = work_root
@@ -2279,7 +2327,9 @@ def unzip(timeline: Timeline):
             _merge_directory_contents(output_path, zip.father)
             _unregister_work_root(output_path)
             output_path = zip.father
-            if _is_nested_archive(zip):
+            # 内层压缩包位于已登记的外层作品根时，zip.father 只是内容子目录，
+            # 不能再登记为更深的作品根，否则后续会只归档这个子目录。
+            if _is_nested_archive(zip) and not _under_work_root(zip.path):
                 _register_work_root(zip.father)
 
         if zip.del_after_unzip and not source_removed:
@@ -2675,6 +2725,20 @@ def _relocate_work_to_library(timeline: Timeline):
     target_path = _resolve_task_work_root(current_path)
     if not target_path:
         return None
+    outer_work_root = _timeline_outer_work_root(timeline, current_path)
+    if (
+        outer_work_root
+        and os.path.normcase(os.path.normpath(target_path))
+        != os.path.normcase(outer_work_root)
+    ):
+        if logger:
+            logger.warning(
+                '归档目标落在外层作品根的子目录，已改用完整作品目录：'
+                '"{}" -> "{}"'.format(
+                    os.path.normpath(target_path), outer_work_root,
+                )
+            )
+        target_path = outer_work_root
     target_path = _locate_relocated_work_root(target_path) or target_path
     if _is_container_or_library_root(target_path):
         narrowed = _narrow_rename_root(target_path, current_path)
@@ -2858,7 +2922,7 @@ def _should_apply_content_filter(timeline: Timeline) -> bool:
     return False
 
 
-def _append_filter_step_record(timeline: Timeline, ops: str):
+def _append_step_record(timeline: Timeline, ops: str):
     record = timeline.get_current_record()
     input_archive = record.output_file or record.input_file
     path = timeline.get_current_path()
@@ -2871,7 +2935,8 @@ def _append_filter_step_record(timeline: Timeline, ops: str):
 def filter_loop():
     seen_roots: set[str] = set()
     for timeline in timelines:
-        if _timeline_step_failed(timeline):
+        current_ops = timeline.get_current_record().ops
+        if _timeline_step_failed(timeline) and current_ops != 'filter_failed':
             continue
         if _is_in_resource_library(timeline.get_current_path()):
             if logger:
@@ -2880,7 +2945,7 @@ def filter_loop():
                         os.path.normpath(timeline.get_current_path() or ''),
                     )
                 )
-            _append_filter_step_record(timeline, 'post_filter_skip')
+            _append_step_record(timeline, 'post_filter_skip')
             continue
 
         # 与重命名一致：内层解压未完成时先推迟，避免在无 RJ 前缀时误跳过过滤
@@ -2928,7 +2993,7 @@ def filter_loop():
                         os.path.normpath(timeline.get_current_path() or work_root or ''),
                     )
                 )
-            _append_filter_step_record(timeline, 'post_filter_skip')
+            _append_step_record(timeline, 'post_filter_skip')
             continue
 
         root_key = _work_root_key(
@@ -2938,7 +3003,7 @@ def filter_loop():
         )
         if root_key and root_key in seen_roots:
             # 同一作品多条时间线：只过滤一次，其余记为已完成以免卡住流水线
-            _append_filter_step_record(timeline, 'post_filter')
+            _append_step_record(timeline, 'post_filter')
             continue
         if root_key:
             seen_roots.add(root_key)
@@ -2953,6 +3018,8 @@ def filter_loop():
                     )
                 )
                 logger.debug(traceback.format_exc())
+            if not _timeline_step_failed(timeline):
+                _append_step_record(timeline, 'filter_failed')
         progress_ui.add2lis(timelines)
 
 
@@ -2975,6 +3042,7 @@ def rename_loop():
     global _last_rename_succeeded_roots
     seen_roots = set()
     succeeded_roots = set()
+    relocated_roots: list[tuple[str, str]] = []
     for timeline in timelines:
         if _timeline_step_failed(timeline):
             continue
@@ -3039,7 +3107,15 @@ def rename_loop():
             continue
         if new_path is not None:
             succeeded_roots.add(root_key)
-            succeeded_roots.add(os.path.normcase(os.path.normpath(new_path)))
+            new_root = os.path.normpath(new_path)
+            succeeded_roots.add(os.path.normcase(new_root))
+            relocated_roots.append((rename_root, new_root))
+
+    # dlrenamer 会直接移动作品目录；同步更新同作品的套娃影子时间线，
+    # 否则后续音频步骤只处理新路径，而影子任务仍停在已不存在的旧路径，
+    # 最终无法按作品根清理并被状态栏误报为“部分完成”。
+    for old_root, new_root in relocated_roots:
+        _remap_work_root(old_root, new_root)
     _last_rename_succeeded_roots = succeeded_roots
     progress_ui.add2lis(timelines)
     if hasattr(progress_ui, '_run_on_ui') and hasattr(progress_ui, '_refresh_run_status'):
@@ -3099,10 +3175,11 @@ def _resolve_rj_for_timeline_root(root: str, timeline: Timeline) -> str | None:
     return None
 
 
-def _iter_unique_audio_work_roots():
+def _iter_unique_audio_work_roots(retry_failed_op: str | None = None):
     seen_roots: set[str] = set()
     for timeline in timelines:
-        if _timeline_step_failed(timeline):
+        current_ops = timeline.get_current_record().ops
+        if _timeline_step_failed(timeline) and current_ops != retry_failed_op:
             continue
         if _is_in_resource_library(timeline.get_current_path()):
             continue
@@ -3119,7 +3196,7 @@ def _iter_unique_audio_work_roots():
 def convert_audio_loop():
     monitor = _start_audio_disk_monitor()
     try:
-        for timeline, root in _iter_unique_audio_work_roots():
+        for timeline, root in _iter_unique_audio_work_roots('convert_audio_failed'):
             try:
                 convert_audio(timeline)
             except Exception as err:
@@ -3130,6 +3207,8 @@ def convert_audio_loop():
                         )
                     )
                     logger.debug(traceback.format_exc())
+                if not _timeline_step_failed(timeline):
+                    _append_step_record(timeline, 'convert_audio_failed')
             progress_ui.add2lis(timelines)
     finally:
         _stop_disk_monitor(monitor)
@@ -3157,6 +3236,7 @@ def convert_audio(timeline: Timeline):
                     len(pending), os.path.normpath(root),
                 )
             )
+        _append_step_record(timeline, 'convert_audio_failed')
         return None
     if pending and not ffmpeg_bin and any(
         audio_convert._needs_ffmpeg_for_source(path) for path in pending
@@ -3167,6 +3247,7 @@ def convert_audio(timeline: Timeline):
                     os.path.normpath(root),
                 )
             )
+        _append_step_record(timeline, 'convert_audio_failed')
         return None
     ok, total = audio_convert.convert_work_folder(
         root,
@@ -3178,6 +3259,15 @@ def convert_audio(timeline: Timeline):
             logger.info(
                 '未发现待转换音频，已跳过："{}"'.format(os.path.normpath(root))
             )
+    elif ok < total:
+        if logger:
+            logger.error(
+                '转flac未全部成功："{}"（{}/{}）'.format(
+                    os.path.normpath(root), ok, total,
+                )
+            )
+        _append_step_record(timeline, 'convert_audio_failed')
+        return None
     elif logger:
         logger.info(
             '转flac完成："{}"（{}/{}）'.format(
@@ -3190,7 +3280,7 @@ def convert_audio(timeline: Timeline):
 def tag_audio_loop():
     monitor = _start_audio_disk_monitor()
     try:
-        for timeline, root in _iter_unique_audio_work_roots():
+        for timeline, root in _iter_unique_audio_work_roots('tag_audio_failed'):
             try:
                 tag_audio(timeline)
             except Exception as err:
@@ -3201,6 +3291,8 @@ def tag_audio_loop():
                         )
                     )
                     logger.debug(traceback.format_exc())
+                if not _timeline_step_failed(timeline):
+                    _append_step_record(timeline, 'tag_audio_failed')
             progress_ui.add2lis(timelines)
     finally:
         _stop_disk_monitor(monitor)
@@ -3255,6 +3347,15 @@ def tag_audio(timeline: Timeline):
             logger.info(
                 '未发现可写入元数据的音频，已跳过："{}"'.format(os.path.normpath(root))
             )
+    elif ok < total:
+        if logger:
+            logger.error(
+                '写入元数据未全部成功："{}"（{}/{}）'.format(
+                    os.path.normpath(root), ok, total,
+                )
+            )
+        _append_step_record(timeline, 'tag_audio_failed')
+        return None
     elif logger:
         logger.info(
             '写入元数据完成："{}"（{}/{}）'.format(
@@ -3280,21 +3381,22 @@ def create_timeline(files):
     return added
 
 
-def delete_file(file_path):  # 删除方法，若配置逻辑删除则丢进回收文件夹
+def delete_file(file_path) -> bool:  # 删除方法，若配置逻辑删除则丢进回收文件夹
     if not file_path or not os.path.exists(file_path):
-        return
-    file_ops.clear_shell_folder_attributes(file_path)
-    if conf.logical_deletion:
-        mk_if_not_exit(conf.recycle_path)
-        dest = conf.recycle_path
-        if file_ops.is_path_under(conf.output_path, file_path):
-            rel_path = os.path.relpath(file_path, conf.output_path)
-            rel_dir = os.path.dirname(rel_path)
-            if rel_dir and rel_dir != '.':
-                dest = os.path.join(conf.recycle_path, rel_dir)
-                mk_if_not_exit(dest)
-        dest_item = os.path.join(dest, os.path.basename(file_path.rstrip('\\')))
-        try:
+        return True
+    dest_item = ''
+    try:
+        file_ops.clear_shell_folder_attributes(file_path)
+        if conf.logical_deletion:
+            mk_if_not_exit(conf.recycle_path)
+            dest = conf.recycle_path
+            if file_ops.is_path_under(conf.output_path, file_path):
+                rel_path = os.path.relpath(file_path, conf.output_path)
+                rel_dir = os.path.dirname(rel_path)
+                if rel_dir and rel_dir != '.':
+                    dest = os.path.join(conf.recycle_path, rel_dir)
+                    mk_if_not_exit(dest)
+            dest_item = os.path.join(dest, os.path.basename(file_path.rstrip('\\')))
             if os.path.isdir(file_path):
                 while os.path.exists(dest_item):
                     dest_item += '(1)'
@@ -3304,30 +3406,38 @@ def delete_file(file_path):  # 删除方法，若配置逻辑删除则丢进回�
                     base, ext = os.path.splitext(dest_item)
                     dest_item = base + '(1)' + ext
                 shutil.move(file_path, dest_item)
-        except FileNotFoundError:
-            # 父目录已整体移走时，子路径再删会找不到源，属预期，不记失败
-            return
-        except (shutil.Error, OSError) as err:
-            if not os.path.exists(file_path):
-                return
-            logger.error(
-                '移入回收站失败，已保留原文件："{}" -> "{}": {}'.format(
-                    os.path.normpath(file_path),
-                    os.path.normpath(dest_item),
-                    err,
-                )
-            )
-            return
-
-    else:
-        if os.path.isdir(file_path):
-            def _rmtree_onerror(func, path, exc_info):
-                file_ops.clear_shell_folder_attributes(path)
-                func(path)
-
-            shutil.rmtree(file_path, onerror=_rmtree_onerror)
         else:
-            os.remove(file_path)
+            if os.path.isdir(file_path):
+                def _rmtree_onerror(func, path, exc_info):
+                    file_ops.clear_shell_folder_attributes(path)
+                    func(path)
+
+                shutil.rmtree(file_path, onerror=_rmtree_onerror)
+            else:
+                os.remove(file_path)
+    except FileNotFoundError:
+        # 父目录已整体移走时，子路径再删会找不到源，属预期，不记失败
+        return not os.path.exists(file_path)
+    except (shutil.Error, OSError) as err:
+        if not os.path.exists(file_path):
+            return True
+        if logger:
+            if conf.logical_deletion:
+                logger.error(
+                    '移入回收站失败，已保留原文件："{}" -> "{}": {}'.format(
+                        os.path.normpath(file_path),
+                        os.path.normpath(dest_item or conf.recycle_path),
+                        err,
+                    )
+                )
+            else:
+                logger.error(
+                    '永久删除失败，已保留原文件："{}": {}'.format(
+                        os.path.normpath(file_path), err,
+                    )
+                )
+        return False
+    return not os.path.exists(file_path)
 
 
 def clear():
@@ -3391,7 +3501,7 @@ def reload_passwords(password_list: list | None = None):
         passwords = password.read_password()
     else:
         passwords = password_list
-    str_passwords = password.get_str_passwords(passwords)
+    str_passwords = password.get_str_passwords(password.sort_passwords(passwords))
     for timeline in timelines:
         record = timeline.get_current_record()
         if record.ops in ('find_zip', 'unzip_failed'):

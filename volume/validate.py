@@ -91,6 +91,44 @@ def _first_volume_has_magic(first_path: str) -> bool:
     )
 
 
+def _classic_zip_data_head(volumes: list[str]) -> str | None:
+    """返回经典 ZIP 的 .z01 数据首卷，主卷可以是 .zip 或 .zip删。"""
+    mains: list[tuple[str, bool, str]] = []
+    z_parts: dict[int, tuple[str, str]] = {}
+    for path in volumes:
+        basename = os.path.basename(path)
+        standard_main = re.fullmatch(r'(?P<stem>.+)\.zip', basename, re.IGNORECASE)
+        disguised_main = re.fullmatch(
+            r'(?P<stem>.+)\.zip[^.]+', basename, re.IGNORECASE,
+        )
+        z_part = re.fullmatch(
+            r'(?P<stem>.+)\.z(?P<part>\d{2})', basename, re.IGNORECASE,
+        )
+        if standard_main or disguised_main:
+            match = standard_main or disguised_main
+            mains.append((match.group('stem').casefold(), bool(disguised_main), path))
+            continue
+        if z_part:
+            z_parts[int(z_part.group('part'))] = (z_part.group('stem').casefold(), path)
+            continue
+        return None
+    if len(mains) != 1 or not z_parts or 1 not in z_parts:
+        return None
+    stem, disguised, main_path = mains[0]
+    if disguised:
+        try:
+            sibling_names = os.listdir(os.path.dirname(main_path))
+        except OSError:
+            return None
+        if any(name.casefold() == f'{stem}.zip' for name in sibling_names):
+            return None
+    if any(part_stem != stem for part_stem, _ in z_parts.values()):
+        return None
+    if sorted(z_parts) != list(range(1, max(z_parts) + 1)):
+        return None
+    return z_parts[1][1]
+
+
 def _seven_zip_exe() -> str | None:
     try:
         import app_paths
@@ -185,6 +223,11 @@ def accept_volume_group(volumes: list[str]) -> bool:
     """判定候选分卷组是否通过魔数 + 7z 试读验证。"""
     if len(volumes) < 2:
         return False
+
+    classic_head = _classic_zip_data_head(volumes)
+    if classic_head:
+        # 经典 ZIP 的中央目录位于末卷，主卷开头通常没有 PK 魔数；应校验 .z01。
+        return magic.is_zip_file(classic_head)
 
     # .z01/.z02 只是经典 ZIP 分卷的数据卷；缺少同 stem 的 .zip 主卷时，
     # 不得建立残缺任务，否则套娃扫描会抢先改名并误报密码错误。

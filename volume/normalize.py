@@ -101,6 +101,37 @@ def normalize_zip001(dirname: str, volumes: list[str]) -> list[str]:
     return normalized
 
 
+def normalize_disguised_classic_zip(dirname: str, volumes: list[str]) -> list[str]:
+    """仅还原经典 ZIP 的主卷名；.z01/.z02 数据卷必须保持原名。"""
+    z_parts: list[tuple[int, str]] = []
+    for path in volumes:
+        match = re.fullmatch(r'(?P<stem>.+)\.z(?P<part>\d{2})', os.path.basename(path), re.IGNORECASE)
+        if match:
+            z_parts.append((int(match.group('part')), path))
+    if not z_parts:
+        return volumes
+    z_parts.sort(key=lambda item: item[0])
+    stem = re.fullmatch(
+        r'(?P<stem>.+)\.z\d{2}', os.path.basename(z_parts[0][1]), re.IGNORECASE,
+    ).group('stem')
+    main = next(
+        (
+            path for path in volumes
+            if re.fullmatch(
+                rf'{re.escape(stem)}\.zip[^.]+', os.path.basename(path), re.IGNORECASE,
+            )
+        ),
+        None,
+    )
+    if not main:
+        return volumes
+    ideal = os.path.join(dirname, f'{stem}.zip')
+    if os.path.normcase(os.path.abspath(main)) != os.path.normcase(os.path.abspath(ideal)):
+        if vol_rename.rename_volume(main, ideal):
+            main = ideal
+    return [main] + [path for _, path in z_parts]
+
+
 def normalize_rar_part(dirname: str, volumes: list[str]) -> list[str]:
     normalized: list[str] = []
     for path in volumes:

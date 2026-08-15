@@ -3,6 +3,7 @@ import struct
 import tempfile
 import unittest
 import wave
+from unittest import mock
 
 import audio_convert
 
@@ -48,6 +49,32 @@ class AudioConvertTests(unittest.TestCase):
         self.assertEqual(audio_convert._clamp_workers(4), 4)
         self.assertEqual(audio_convert._clamp_workers(99), 32)
         self.assertEqual(audio_convert._clamp_workers('bad'), 4)
+
+    def test_commit_failure_preserves_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, 'track.wav')
+            with open(source, 'wb') as handle:
+                handle.write(b'RIFFdata')
+
+            def fake_convert(_source, temp_path, **_kwargs):
+                with open(temp_path, 'wb') as handle:
+                    handle.write(b'fLaCdata')
+                return True
+
+            with mock.patch.object(
+                audio_convert, '_convert_with_flac', side_effect=fake_convert,
+            ), mock.patch.object(
+                audio_convert.os, 'replace', side_effect=OSError('commit failed'),
+            ):
+                with self.assertRaises(OSError):
+                    audio_convert.convert_to_flac(
+                        source,
+                        flac='flac.exe',
+                        delete_source=True,
+                    )
+
+            self.assertTrue(os.path.isfile(source))
+            self.assertFalse(os.path.exists(os.path.join(tmp, 'track.flac')))
 
 
 if __name__ == '__main__':

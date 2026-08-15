@@ -11,6 +11,10 @@ _MP3_PATTERN = re.compile(r'\.MP3$', re.IGNORECASE)
 _MP3_DIR_PATTERN = re.compile(r'MP3', re.IGNORECASE)
 
 
+class FilterDeleteError(RuntimeError):
+    pass
+
+
 def _compile_filter_patterns(keyword_list: list, logger) -> list[tuple[re.Pattern, str, bool]]:
     compiled: list[tuple[re.Pattern, str, bool]] = []
     for key in keyword_list:
@@ -83,10 +87,18 @@ class Filter():
     def _is_extension_only_dir_match(self, matched: str) -> bool:
         return matched.endswith(':dir')
 
+    @staticmethod
+    def _delete_path(path: str) -> None:
+        task_runner.delete_file(path)
+        # 兼容现有删除钩子：旧实现成功时可能返回 None，以源路径是否仍存在
+        # 作为最终依据；只要源仍存在，就不能把过滤记录为成功。
+        if os.path.exists(path):
+            raise FilterDeleteError('过滤目标删除失败：{}'.format(os.path.normpath(path)))
+
     def _delete_directory_tree(self, dir_path: str, matched: str) -> bool:
         if not os.path.isdir(dir_path):
             return False
-        task_runner.delete_file(dir_path)
+        self._delete_path(dir_path)
         self.logger.info('过滤文件夹: [ {} ] 命中关键词： [ {} ]'.format(dir_path, matched))
         return True
 
@@ -103,7 +115,7 @@ class Filter():
                     hit = True
                     continue
                 if self._matches_file(file_path):
-                    task_runner.delete_file(file_path)
+                    self._delete_path(file_path)
                     self.logger.info('过滤文件: [ {} ] 命中关键词： [ {} ]'.format(file_path, matched))
                     hit = True
                 else:
@@ -116,7 +128,7 @@ class Filter():
                 except OSError:
                     pass
         if os.path.isdir(dir_path):
-            task_runner.delete_file(dir_path)
+            self._delete_path(dir_path)
             self.logger.info('过滤文件夹: [ {} ] 命中关键词： [ {} ]'.format(dir_path, matched))
             hit = True
         return hit
@@ -173,7 +185,7 @@ class Filter():
                     continue
                 matched = self._matches_file(file_path)
                 if matched:
-                    task_runner.delete_file(file_path)
+                    self._delete_path(file_path)
                     self.logger.info('过滤文件: [ {} ] 命中关键词： [ {} ]'.format(file_path, matched))
                     hit = True
         return hit

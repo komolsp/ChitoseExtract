@@ -64,6 +64,15 @@ _APK_MARKER_NAMES = frozenset({
 })
 _APK_MARKER_PREFIXES = ('META-INF/', 'lib/', 'assets/', 'res/')
 
+# Office Open XML 文档本身是 ZIP 容器。套娃扫描若只看 PK 文件头，会把
+# 台本.docx 等正常素材当作内层压缩包解开并删除原文件。
+_OOXML_PACKAGE_PREFIXES = {
+    '.docx': 'word/', '.docm': 'word/', '.dotx': 'word/', '.dotm': 'word/',
+    '.xlsx': 'xl/', '.xlsm': 'xl/', '.xltx': 'xl/', '.xltm': 'xl/', '.xlsb': 'xl/',
+    '.pptx': 'ppt/', '.pptm': 'ppt/', '.potx': 'ppt/', '.potm': 'ppt/',
+    '.ppsx': 'ppt/', '.ppsm': 'ppt/', '.sldx': 'ppt/', '.sldm': 'ppt/',
+}
+
 # 7-Zip 需 -t# 解析的载体后缀（内嵌压缩或视频隐写）
 _COVERED_CARRIER_EXTENSIONS = frozenset({
     '.mp4', '.mkv', '.avi', '.wmv', '.mov', '.webm',
@@ -409,15 +418,6 @@ def _probe_mp4_mov_stego(file_path: str, *, nested: bool) -> ArchiveProbe | None
     return ArchiveProbe(False)
 
 
-def _is_likely_jpeg_file(file_path: str) -> bool:
-    try:
-        with open(file_path, 'rb') as f:
-            header = f.read(3)
-    except OSError:
-        return False
-    return len(header) >= 3 and header[0:3] == b'\xff\xd8\xff'
-
-
 def _is_likely_image_file(file_path: str) -> bool:
     """文件头是否为常见图片格式，用于与隐写套娃 / JPEG 内嵌字节误判区分。"""
     try:
@@ -513,6 +513,26 @@ def _probe_apk_path(file_path: str) -> ArchiveProbe:
         format_hint = _format_hint_for_file(file_path)
         return ArchiveProbe(True, covered=True, format_type=format_hint)
     return ArchiveProbe(False)
+
+
+def _is_likely_ooxml_document(file_path: str, extension: str) -> bool:
+    """识别合法 OOXML 文档；只有扩展名和包结构同时匹配才跳过解压。"""
+    package_prefix = _OOXML_PACKAGE_PREFIXES.get(extension.lower())
+    if not package_prefix or not _read_file_header(file_path).startswith(b'PK'):
+        return False
+    try:
+        import zipfile
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            names = {
+                name.replace('\\', '/').lstrip('/').lower()
+                for name in zf.namelist()
+            }
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError):
+        return False
+    return (
+        '[content_types].xml' in names
+        and any(name.startswith(package_prefix) for name in names)
+    )
 
 
 def _is_likely_pe_executable(file_path: str) -> bool:
@@ -901,6 +921,9 @@ def probe_archive(file_path: str, *, nested: bool = False) -> ArchiveProbe:
     _, ext = os.path.splitext(file_path)
     ext = ext.lower()
 
+    if _is_likely_ooxml_document(file_path, ext):
+        return ArchiveProbe(False)
+
     if ext == _APK_EXTENSION:
         return _probe_apk_path(file_path)
 
@@ -1003,11 +1026,6 @@ def probe_archive(file_path: str, *, nested: bool = False) -> ArchiveProbe:
         return ArchiveProbe(True, covered=True)
 
     return ArchiveProbe(False)
-
-
-def is_archive_candidate(file_path: str) -> bool:
-    """判断文件是否值得交给 7-Zip 尝试打开。"""
-    return probe_archive(file_path).is_candidate
 
 
 RJ_CODE_PATTERN = re.compile(r'[RBV]J(\d{6}|\d{8})(?!\d+)', re.IGNORECASE)
@@ -1182,12 +1200,6 @@ def _scan_text_file_for_rj(file_path: str, *, allow_bare: bool = False) -> list[
     return []
 
 
-def find_rj_in_names(names: list[str], *, allow_bare: bool = False) -> str | None:
-    """从文件名/路径列表中提取出现最多的 RJ 号。"""
-    candidates = find_rj_candidates_in_names(names, allow_bare=allow_bare)
-    return candidates[0][0] if candidates else None
-
-
 def find_rj_candidates_in_directory(
         root: str, max_depth: int = _RJ_SCAN_MAX_DEPTH,
         *, allow_bare: bool = False) -> list[tuple[str, str, int]]:
@@ -1222,11 +1234,6 @@ def find_rj_candidates_in_directory(
                     _score_rj_candidate(scores, code, source, 2)
 
     return _sorted_rj_candidates(scores)
-
-
-def find_rj_in_directory(root: str, max_depth: int = _RJ_SCAN_MAX_DEPTH) -> str | None:
-    candidates = find_rj_candidates_in_directory(root, max_depth=max_depth)
-    return candidates[0][0] if candidates else None
 
 
 _FOLDER_ICON_RJ_RE = re.compile(r'^@folder-icon-([RBV]J\d{6,8})\.ico$', re.IGNORECASE)
@@ -1449,46 +1456,6 @@ def _needs_trailing_space_fix(name: str) -> bool:
     return bool(stripped) and stripped != name
 
 
-def safe_copy_replace(src: str, dest: str) -> bool:
-    """复制 src 到 dest 并删除 src；目标已存在或校验失败时不删 src。"""
-    if os.path.normcase(src) == os.path.normcase(dest):
-        return True
-    if path_exists(dest):
-        logger.warning('复制替换跳过，目标已存在：[{}] -> [{}]'.format(src, dest))
-        return False
-    try:
-        src_size = os.path.getsize(src)
-    except OSError as err:
-        logger.warning('复制替换失败，无法读取源大小：[{}]: {}'.format(src, err))
-        return False
-    try:
-        shutil.copy2(src, dest)
-    except OSError as err:
-        logger.warning('复制替换失败：[{}] -> [{}]: {}'.format(src, dest, err))
-        return False
-    try:
-        dest_size = os.path.getsize(dest)
-    except OSError:
-        dest_size = -1
-    if dest_size != src_size:
-        logger.warning(
-            '复制替换大小不一致，删除残缺目标：[{}] -> [{}] ({} vs {})'.format(
-                src, dest, src_size, dest_size,
-            ),
-        )
-        try:
-            os.remove(dest)
-        except OSError:
-            pass
-        return False
-    try:
-        os.remove(src)
-    except OSError as err:
-        logger.warning('复制后删除源失败，保留双份：[{}]: {}'.format(src, err))
-        return False
-    return True
-
-
 def safe_rename_path(src: str, dest: str) -> bool:
     """重命名路径；Windows 下用扩展路径以支持末尾空格/点。"""
     last_err: BaseException | None = None
@@ -1509,15 +1476,6 @@ def safe_rename_path(src: str, dest: str) -> bool:
     if last_err is not None:
         logger.warning('重命名失败 [{}] -> [{}]: {}'.format(src, dest, last_err))
     return False
-
-
-def rename_archive_volume(src: str, dest: str) -> bool:
-    """分卷重命名：优先 rename，失败时 copy+删除（应对 Windows 占用或多重扩展名）。"""
-    if os.path.normcase(src) == os.path.normcase(dest):
-        return True
-    if safe_rename_path(src, dest):
-        return True
-    return safe_copy_replace(src, dest)
 
 
 def is_cross_drive_path(src: str, dest: str) -> bool:
@@ -1729,25 +1687,6 @@ def is_wrapper_dir(dir_path: str) -> bool:
         return False
     only = join_dir(dir_path, entries[0])
     return is_dir_path(only)
-
-
-def _move_dir_contents_up(src_dir: str, dest_dir: str):
-    if not is_dir_path(src_dir) or not path_exists(src_dir):
-        return
-    mk_if_not_exit(dest_dir)
-    for item in list_dir_names(src_dir):
-        src = join_dir(src_dir, item)
-        dest = join_dir(dest_dir, item)
-        while path_exists(dest):
-            dest += '(1)'
-        if sys.platform == 'win32':
-            try:
-                import win32file
-                win32file.MoveFile(_extended_path(src), _extended_path(dest))
-                continue
-            except OSError:
-                pass
-        shutil.move(src, dest)
 
 
 def _hard_remove_dir_path(dir_path: str):

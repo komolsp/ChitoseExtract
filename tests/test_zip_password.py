@@ -319,6 +319,62 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
 
             unzipper.password_collision.assert_called_once()
 
+    def test_split_zip_namelist_probe_does_not_hide_correct_candidate(self):
+        from seven_z_driver import UnzipError
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'split.zip.001')
+            second_path = os.path.join(tmp, 'split.zip.002')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+            with open(second_path, 'wb') as fh:
+                fh.write(b'\x00' * 16)
+
+            archive = Zip(
+                path,
+                ['wrong', 'correct'],
+                False,
+                volumes=[path, second_path],
+            )
+            archive.pw_list = ['wrong', 'correct']
+            archive.file_list = ['RJ01593274.7z.002']
+            archive.compression_ratio_info = {
+                'encrypted': False, 'compression_ratio': 10,
+            }
+
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper.driver.get_namelist = mock.MagicMock(
+                return_value=(
+                    ['RJ01593274.7z.002'],
+                    {'encrypted': False, 'compression_ratio': 10},
+                ),
+            )
+            unzipper.driver.unzip = mock.MagicMock(
+                side_effect=[
+                    UnzipError('ERROR: Wrong password : RJ01593274.7z.002'),
+                    UnzipError('ERROR: Wrong password : RJ01593274.7z.002'),
+                    (0, ''),
+                ],
+            )
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                return_value=False,
+            )
+
+            self.assertTrue(unzipper._resolve_password_with_namelist(archive))
+            self.assertEqual(archive.pw_list, ['wrong', 'correct'])
+            self.assertEqual(
+                unzipper.password_collision(archive, output_path),
+                'correct',
+            )
+            self.assertEqual(
+                [call.args[2] for call in unzipper.driver.unzip.call_args_list],
+                ['wrong', '', 'correct'],
+            )
+
     def test_load_namelist_rejects_7z_list_only_password(self):
         from unzip_process_pool import ProcessResourceManager
         from unzipper import Unzipper
