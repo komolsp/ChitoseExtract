@@ -62,6 +62,9 @@ STATUS_GIF_GAP = 10
 STATUS_TOP_ROW_HEIGHT = STATUS_GIF_SIZE + 8
 STATUS_BANNER_ROW_HEIGHT = 22
 STATUS_BANNER_INLINE_MAX = 36
+GUI_LOG_FLUSH_INTERVAL_MS = 50
+GUI_LOG_BATCH_SIZE = 1000
+GUI_LOG_MAX_LINES = 5000
 
 STEP_OPTIONS = [
     ('unzip', '解压'),
@@ -372,11 +375,13 @@ class Console(ttk.Frame):
         self._disk_speed_vars: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
         self._last_task_elapsed: float | None = None
         self._log_queue = None
+        self._pending_gui_log: queue.Queue[str] = queue.Queue()
         self._worker_busy = False
         self._worker_interrupted = False
         self._worker_last_step = None
         self._build_layout()
         self._task_buttons = self._collect_task_buttons()
+        self.after(GUI_LOG_FLUSH_INTERVAL_MS, self._flush_gui_log)
 
     def _collect_task_buttons(self):
         buttons = [self.btn_run, self.btn_clear, self.btn_settings, self.btn_output,
@@ -680,10 +685,33 @@ class Console(ttk.Frame):
         self.task_tree.insert('', 'end', values=(input_text, step_text, output_text), tags=(tag,))
 
     def write(self, info):
-        def _do():
-            self.text.insert('end', info)
+        """线程安全地缓存日志，由 Tk 主线程定时批量写入。"""
+        self._pending_gui_log.put(info)
+
+    def _flush_gui_log(self):
+        pending: list[str] = []
+        for _ in range(GUI_LOG_BATCH_SIZE):
+            try:
+                pending.append(self._pending_gui_log.get_nowait())
+            except queue.Empty:
+                break
+
+        if pending:
+            self.text.insert('end', ''.join(pending))
+            try:
+                line_count = int(self.text.index('end-1c').split('.', 1)[0])
+            except (ValueError, tk.TclError):
+                line_count = 0
+            overflow = line_count - GUI_LOG_MAX_LINES
+            if overflow > 0:
+                self.text.delete('1.0', f'{overflow + 1}.0')
             self.text.see(tk.END)
-        self._run_on_ui(_do)
+
+        delay = 0 if len(pending) >= GUI_LOG_BATCH_SIZE else GUI_LOG_FLUSH_INTERVAL_MS
+        try:
+            self.after(delay, self._flush_gui_log)
+        except tk.TclError:
+            pass
 
     def clear(self):
         if self._worker_busy:

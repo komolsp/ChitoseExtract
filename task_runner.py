@@ -1326,10 +1326,12 @@ def scan_work_queue():
                     claimed_volume_identities.add(identity)
             archive_registry.forget(zip_obj.path, zip_obj.volumes)
             _apply_queued_note(zip_obj)
-            new_timelines.append(Timeline(Archive(source), 'find_zip', zip_obj))
+            # 同一拖入目录可能发现大量压缩包。复用原始 Archive，避免为每个
+            # 压缩包再次递归 os.walk 整个目录并复制一份 file_list。
+            new_timelines.append(Timeline(queued_archive, 'find_zip', zip_obj))
         for zip_obj in unresolved_list:
             _apply_queued_note(zip_obj)
-            new_timelines.append(Timeline(Archive(source), 'unzip_failed', zip_obj))
+            new_timelines.append(Timeline(queued_archive, 'unzip_failed', zip_obj))
         removed.append(timeline)
 
     for timeline in removed:

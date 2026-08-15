@@ -76,6 +76,37 @@ class ScanFailureStatusTests(unittest.TestCase):
         self.assertEqual(task_runner.timelines[0].get_current_record().ops, 'find_zip')
         self.assertEqual(task_runner.unzipper.find_zip.call_count, 2)
 
+    def test_scan_reuses_source_archive_for_multiple_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, 'batch')
+            os.makedirs(source)
+            paths = [os.path.join(source, name) for name in ('a.zip', 'b.zip')]
+            for path in paths:
+                with open(path, 'wb') as handle:
+                    handle.write(b'PK\x03\x04')
+
+            source_archive = Archive(source)
+            task_runner.timelines.append(
+                Timeline(source_archive, 'create_timeline', source_archive)
+            )
+
+            def find_archives(_source, _passwords, delete_after, _already, zip_list, **_kwargs):
+                zip_list.extend(Zip(path, [], delete_after) for path in paths)
+
+            task_runner.unzipper.find_zip.side_effect = find_archives
+            with mock.patch.object(
+                task_runner,
+                '_filter_already_extracted_archives',
+                side_effect=lambda items, *_args, **_kwargs: items,
+            ):
+                self.assertEqual(task_runner.scan_work_queue(), 2)
+
+        self.assertEqual(len(task_runner.timelines), 2)
+        self.assertTrue(all(
+            timeline.records[0].input_file is source_archive
+            for timeline in task_runner.timelines
+        ))
+
 
 if __name__ == '__main__':
     unittest.main()

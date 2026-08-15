@@ -248,9 +248,6 @@ class Unzipper():
             total = 1
         current = min(max(current, 0), total)
         self.resource.log_queue.put(('unzip', f'解压中 {current}/{total}'))
-        ui = self.progress_ui
-        if ui is not None and hasattr(ui, 'update_progress'):
-            ui.update_progress(current, total, f'解压中 {current}/{total}')
 
     def _will_use_single_operation_unzip(self, zip: Zip, size: float,
                                          thread_threshold_mb: float,
