@@ -79,7 +79,10 @@ launch.bat
 源码/
 ├── main.py              # 程序入口
 ├── gui.py               # 图形界面
-├── task_runner.py       # 任务调度与流水线
+├── task_runner.py       # 兼容入口与各处理步骤
+├── workflow_context.py  # 工作流服务与共享状态
+├── workflow_orchestrator.py # 流水线步骤编排
+├── queue_scanner.py     # 扫描队列、去重与分卷归组
 ├── unzipper.py          # 解压核心逻辑
 ├── config.yaml          # 主配置文件
 ├── password.txt         # 解压密码库
@@ -93,7 +96,7 @@ launch.bat
 ├── dlrenamer/           # DLsite 元数据重命名模块
 ├── scraper/             # DLsite 刮削器
 ├── volume/              # 分卷识别与解析
-└── tests/               # 自动化测试（188 项）
+└── tests/               # 自动化测试（286 项）
 ```
 
 ---
@@ -160,7 +163,7 @@ pip install -r requirements.txt
 python -W ignore::ResourceWarning -m unittest discover -s tests -q
 ```
 
-当前测试套件共 **282** 项，覆盖分卷解析、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
+当前测试套件共 **286** 项，覆盖分卷解析、扫描队列、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
 
 ---
 

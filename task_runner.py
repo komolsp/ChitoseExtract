@@ -23,6 +23,14 @@ from timeline import Timeline, Archive, Record, extend
 from zip import Zip
 from renamer import RenameDuplicateError
 from workflow_context import WorkflowContext
+from queue_scanner import (
+    QueueScanDependencies,
+    QueueScanner,
+    filter_volume_sibling_unresolved as queue_filter_volume_sibling_unresolved,
+    volume_group_key as queue_volume_group_key,
+    volume_task_identity as queue_volume_task_identity,
+    zip_volume_identities as queue_zip_volume_identities,
+)
 
 workflow_context = WorkflowContext()
 logger = workflow_context.services.logger
@@ -34,6 +42,7 @@ renamer = workflow_context.services.renamer
 progress_ui = workflow_context.services.progress_ui
 already_add = workflow_context.state.already_add
 timelines = workflow_context.state.timelines
+_queue_scanner = QueueScanner(workflow_context.state)
 
 # 顶层压缩包「就地解压」产生的作品工作目录集合（保留原始大小写）。
 # 用于让整个流程识别出音声库之外的临时工作目录边界：先在原地解压识别，
@@ -247,20 +256,7 @@ def _timeline_outer_work_root(
 
 
 def _zip_path_already_queued(path: str | None) -> bool:
-    if not path:
-        return False
-    norm = os.path.normcase(os.path.normpath(path))
-    for timeline in timelines:
-        record = timeline.get_current_record()
-        zip_obj = record.output_file
-        if not isinstance(zip_obj, Zip):
-            continue
-        # unzip_failed 仍需重试，不能视为已入队
-        if record.ops != 'find_zip':
-            continue
-        if os.path.normcase(os.path.normpath(zip_obj.path)) == norm:
-            return True
-    return False
+    return _queue_scanner.is_archive_path_queued(path)
 
 
 def _is_likely_retryable_unzip_failure(zip_obj: Zip) -> bool:
@@ -1232,14 +1228,7 @@ def _requeue_unzip_failures():
 
 
 def _is_path_queued(path: str) -> bool:
-    norm = os.path.normcase(os.path.normpath(path))
-    for timeline in timelines:
-        if not timeline.records:
-            continue
-        first = timeline.records[0].input_file
-        if first and os.path.normcase(os.path.normpath(first.path)) == norm:
-            return True
-    return False
+    return _queue_scanner.is_source_path_queued(path)
 
 
 def _sync_archive_registry():
@@ -1270,17 +1259,7 @@ def _remember_unzipped_archive(zip_obj: Zip):
 
 def _collect_already_add_from_timelines():
     """从已有解压任务回填 already_add，避免重复扫描分卷。"""
-    paths: list[str] = []
-    for timeline in timelines:
-        record = timeline.get_current_record()
-        if record.ops not in ('find_zip', 'unzip_failed'):
-            continue
-        zip_obj = record.output_file
-        if isinstance(zip_obj, Zip) and zip_obj.volumes:
-            paths.extend(zip_obj.volumes)
-        elif hasattr(zip_obj, 'path') and zip_obj.path:
-            paths.append(zip_obj.path)
-    return paths
+    return _queue_scanner.collect_already_add()
 
 
 def prepare_archive_queue():
@@ -1303,82 +1282,22 @@ def prepare_archive_queue():
 
 def scan_work_queue():
     """启动解压前：将工作区拖入项扫描为可解压任务。"""
-    queued = [
-        t for t in timelines
-        if t.get_current_record().ops in ('create_timeline', 'scan_failed')
-    ]
-    if not queued:
-        return 0
-
-    scan_already_add = _collect_already_add_from_timelines()
-    new_timelines: list[Timeline] = []
-    removed: list[Timeline] = []
     str_passwords = password.get_str_passwords(password.sort_passwords(passwords))
-    claimed_volume_groups: set[tuple[str, ...]] = set()
-    claimed_volume_identities: set[tuple] = set()
-
-    for timeline in queued:
-        source = timeline.records[0].input_file.path
-        queued_archive = timeline.records[0].input_file
-        _prepare_user_rescan(source)
-        zip_list: list = []
-        unresolved_list: list = []
-        unzipper.find_zip(
-            source, str_passwords, conf.del_after_unzip, scan_already_add,
-            zip_list, unresolved_list=unresolved_list, collect_unresolved=True,
-        )
-        zip_list[:] = _filter_already_extracted_archives(
-            zip_list, str_passwords, scan_already_add,
-            allow_reextract=True,
-        )
-        unresolved_list[:] = _filter_volume_sibling_unresolved(zip_list, unresolved_list)
-        if not zip_list and not unresolved_list:
-            if logger:
-                logger.warning(
-                    '工作区项未发现可处理压缩文件："{}"'.format(
-                        os.path.normpath(source),
-                    ),
-                )
-            # 扫描失败不能移除最后一条时间线，否则空队列会被 UI 误报为“已完成”。
-            if timeline.get_current_record().ops != 'scan_failed':
-                timeline.add_record(Record(queued_archive, 'scan_failed', queued_archive))
-            continue
-
-        def _apply_queued_note(zip_obj):
-            if getattr(queued_archive, 'note', None):
-                zip_obj.set_note(queued_archive.note)
-            elif queued_archive.RJ_code and hasattr(zip_obj, 'pw_list'):
-                if queued_archive.RJ_code not in zip_obj.pw_list:
-                    zip_obj.pw_list.insert(0, queued_archive.RJ_code)
-                    zip_obj.invalidate_namelist_scan()
-
-        for zip_obj in zip_list:
-            if zip_obj.volumes and len(zip_obj.volumes) > 1:
-                vol_key = _volume_group_key(zip_obj.volumes)
-                identity = _volume_task_identity(zip_obj, source)
-                if vol_key in claimed_volume_groups:
-                    continue
-                if identity and identity in claimed_volume_identities:
-                    continue
-                claimed_volume_groups.add(vol_key)
-                if identity:
-                    claimed_volume_identities.add(identity)
-            archive_registry.forget(zip_obj.path, zip_obj.volumes)
-            _apply_queued_note(zip_obj)
-            # 同一拖入目录可能发现大量压缩包。复用原始 Archive，避免为每个
-            # 压缩包再次递归 os.walk 整个目录并复制一份 file_list。
-            new_timelines.append(Timeline(queued_archive, 'find_zip', zip_obj))
-        for zip_obj in unresolved_list:
-            _apply_queued_note(zip_obj)
-            new_timelines.append(Timeline(queued_archive, 'unzip_failed', zip_obj))
-        removed.append(timeline)
-
-    for timeline in removed:
-        timelines.remove(timeline)
-    timelines.extend(new_timelines)
+    on_queue_changed = None
     if progress_ui != 'not initialized':
-        progress_ui.add2lis(timelines)
-    return len(new_timelines)
+        on_queue_changed = progress_ui.add2lis
+    return _queue_scanner.scan(
+        passwords=str_passwords,
+        delete_after_unzip=conf.del_after_unzip,
+        dependencies=QueueScanDependencies(
+            find_zip=unzipper.find_zip,
+            prepare_rescan=_prepare_user_rescan,
+            filter_discovered=_filter_already_extracted_archives,
+            forget_archive=archive_registry.forget,
+            logger=logger,
+            on_queue_changed=on_queue_changed,
+        ),
+    )
 
 
 def unzip_loop():
@@ -1447,51 +1366,16 @@ def unzip_loop():
 
 
 def _volume_group_key(volumes: list[str]) -> tuple[str, ...]:
-    return tuple(sorted(os.path.normcase(v) for v in volumes))
+    return queue_volume_group_key(volumes)
 
 
 def _zip_volume_identities(zip_obj: Zip, source_path: str | None = None) -> set[tuple]:
-    identities: set[tuple] = set()
-    identity = _volume_task_identity(zip_obj, source_path)
-    if identity:
-        identities.add(identity)
-    if zip_obj.volumes and len(zip_obj.volumes) > 1:
-        try:
-            from volume.collect import volume_group_identity
-            group_identity = volume_group_identity(zip_obj.volumes)
-            if group_identity:
-                identities.add(group_identity)
-        except ImportError:
-            pass
-    return identities
+    return queue_zip_volume_identities(zip_obj, source_path)
 
 
 def _filter_volume_sibling_unresolved(zip_list: list, unresolved_list: list) -> list:
     """首卷已在 zip_list 时，剔除同组分卷的失败占位项。"""
-    claimed_paths: set[str] = set()
-    claimed_identities: set[tuple] = set()
-    for zip_obj in zip_list:
-        if not isinstance(zip_obj, Zip):
-            continue
-        if zip_obj.volumes:
-            claimed_paths.update(os.path.normcase(p) for p in zip_obj.volumes)
-        claimed_identities.update(_zip_volume_identities(zip_obj))
-
-    filtered: list = []
-    for zip_obj in unresolved_list:
-        if not isinstance(zip_obj, Zip):
-            filtered.append(zip_obj)
-            continue
-        path_norm = os.path.normcase(zip_obj.path or '')
-        if path_norm and path_norm in claimed_paths:
-            continue
-        if zip_obj.volumes:
-            if any(os.path.normcase(p) in claimed_paths for p in zip_obj.volumes):
-                continue
-        if _zip_volume_identities(zip_obj) & claimed_identities:
-            continue
-        filtered.append(zip_obj)
-    return filtered
+    return queue_filter_volume_sibling_unresolved(zip_list, unresolved_list)
 
 
 def _dismiss_volume_sibling_failures(zip_obj: Zip, source_path: str | None = None) -> int:
@@ -1562,14 +1446,7 @@ def _prune_unzipped_volume_failures():
 
 
 def _volume_task_identity(zip_obj: Zip, source_path: str | None = None) -> tuple | None:
-    from volume import collect as volume_collect
-    if source_path:
-        identity = volume_collect.volume_group_identity_for_anchor(source_path)
-        if identity:
-            return identity
-    if isinstance(zip_obj, Zip) and zip_obj.volumes and len(zip_obj.volumes) > 1:
-        return volume_collect.volume_group_identity(zip_obj.volumes)
-    return None
+    return queue_volume_task_identity(zip_obj, source_path)
 
 
 def _timeline_volume_work_root(timeline: Timeline) -> str | None:
