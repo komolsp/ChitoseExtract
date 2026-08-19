@@ -5,6 +5,11 @@ from enum import Enum
 
 import file_ops
 import archive_registry
+from archive_recognition import (
+    ArchiveRecognition,
+    RecognitionContext,
+    recognize_archive,
+)
 from seven_z_driver import (
     SevenZDriver,
     JapDecodeError,
@@ -45,6 +50,11 @@ class Unzipper():
         from volume.resolver import is_standard_volume_group
         if is_volume and zip.volumes and is_standard_volume_group(zip.volumes):
             return [(None, False)]
+        recognition = zip.current_recognition()
+        if recognition is not None and recognition.is_volume == is_volume:
+            strategies = recognition.strategy_pairs()
+            if strategies:
+                return strategies
         return file_ops.build_archive_open_strategies(
             file_ops.ArchiveProbe(True, covered=zip.covered, format_type=zip.format_type),
             zip.extension,
@@ -105,7 +115,10 @@ class Unzipper():
             if ok:
                 return True
         if not file_ops.is_standard_archive_file(archive_path):
-            return file_ops.probe_archive(archive_path, nested=True).is_candidate
+            return recognize_archive(
+                archive_path,
+                context=RecognitionContext.NESTED,
+            ).is_candidate
         return False
 
     def _output_has_usable_partial_extract(self, output_path: str) -> bool:
@@ -175,6 +188,7 @@ class Unzipper():
                         jap=zip.jap,
                         covered=covered,
                         format_type=format_type,
+                        recognition=zip.current_recognition(),
                     )
                 except GetNamelistError as err:
                     if 'Wrong password' in err.error_info:
@@ -187,8 +201,11 @@ class Unzipper():
                     if self._reject_covered_namelist(zip, covered):
                         continue
                     zip.compression_ratio_info = info
-                    zip.covered = covered
-                    zip.format_type = format_type
+                    zip.apply_open_result(
+                        format_type,
+                        covered,
+                        encrypted=bool(info.get('encrypted')),
+                    )
                     if self._namelist_password_needs_extract_confirmation(zip):
                         zip.pw_list = original_passwords
                     else:
@@ -206,6 +223,7 @@ class Unzipper():
                         jap=zip.jap,
                         covered=covered,
                         format_type=format_type,
+                        recognition=zip.current_recognition(),
                     )
                 except GetNamelistError as err:
                     if 'Wrong password' in err.error_info:
@@ -219,8 +237,11 @@ class Unzipper():
                         continue
                     zip.file_list = list(set(namelist))
                     zip.compression_ratio_info = info
-                    zip.covered = covered
-                    zip.format_type = format_type
+                    zip.apply_open_result(
+                        format_type,
+                        covered,
+                        encrypted=bool(info.get('encrypted')),
+                    )
                     if self._namelist_password_needs_extract_confirmation(zip):
                         zip.pw_list = original_passwords
                     else:
@@ -280,20 +301,33 @@ class Unzipper():
         if not encrypted:
             return True
         ext = (zip.extension or os.path.splitext(compress_file)[1]).lower()
-        if ext == '.zip':
-            # ZIP（包括 AES/传统加密及分卷）常可在无密码时列出目录；
+        is_zip = zip.is_format('zip') or file_ops.zip_has_encrypted_entries(
+            compress_file,
+        )
+        if is_zip:
+            # ZIP（包括改名后缀、AES/传统加密及分卷）常可在无密码时列出目录；
             # 此处只排除空密码，不做全包 7z t。正式解压会按候选密码
             # 依次尝试，并以 7-Zip 的退出码完成最终校验，避免整包读取两次。
             return bool(password)
-        if not file_ops.is_standard_archive_file(compress_file):
+        recognition = zip.current_recognition()
+        is_direct_known_archive = bool(
+            recognition
+            and recognition.is_direct_archive
+            and (zip.is_format('7z') or zip.is_format('rar'))
+        )
+        if not (
+            file_ops.is_standard_archive_file(compress_file)
+            or is_direct_known_archive
+        ):
             return True
-        if ext in ('.7z', '.rar', '.zip'):
+        if ext in ('.7z', '.rar', '.zip') or is_direct_known_archive:
             ok, _msg = self.driver.test_archive(
                 compress_file=compress_file,
                 password=password,
                 jap=zip.jap,
                 covered=covered,
                 format_type=format_type,
+                recognition=recognition,
             )
             return ok
         return True
@@ -324,8 +358,15 @@ class Unzipper():
         返回试密列表；None 表示沿用常规 pw_list；
         空列表表示已识别为特殊 7z 且无用户侧密码，应中止。
         """
+        recognition = zip.current_recognition()
+        is_direct_7z = bool(
+            recognition and recognition.is_direct_archive and zip.is_format('7z')
+        )
         ext = (zip.extension or os.path.splitext(scan_path)[1]).lower()
-        if ext != '.7z' or not file_ops.is_standard_archive_file(scan_path):
+        if not (
+            (ext == '.7z' and file_ops.is_standard_archive_file(scan_path))
+            or is_direct_7z
+        ):
             return None
 
         if zip.requires_manual_password():
@@ -366,9 +407,15 @@ class Unzipper():
             passwords = manual_passwords
         else:
             passwords = self._ordered_password_candidates(zip, password_probe_limit)
-        if file_ops.is_standard_archive_file(zip.path):
+        recognition = zip.current_recognition()
+        is_direct_known_archive = bool(
+            recognition
+            and recognition.is_direct_archive
+            and any(zip.is_format(fmt) for fmt in ('zip', '7z', 'rar'))
+        )
+        if file_ops.is_standard_archive_file(zip.path) or is_direct_known_archive:
             ext = (zip.extension or '').lower()
-            if ext in ('.7z', '.rar'):
+            if zip.is_format('7z') or zip.is_format('rar'):
                 passwords = [pw for pw in passwords if pw]
             elif '' not in passwords:
                 passwords.insert(0, '')
@@ -403,6 +450,7 @@ class Unzipper():
                                     jap=zip.jap,
                                     covered=covered,
                                     format_type=format_type,
+                                    recognition=zip.current_recognition(),
                                 )
                             except GetNamelistError as err:
                                 if 'Wrong password' in err.error_info:
@@ -446,8 +494,11 @@ class Unzipper():
                                     volume_namelist = []
                                     retry = False
                                     continue
-                                zip.covered = covered
-                                zip.format_type = format_type
+                                zip.apply_open_result(
+                                    format_type,
+                                    covered,
+                                    encrypted=bool(strategy_ratio_info.get('encrypted')),
+                                )
                                 compression_ratio_info = strategy_ratio_info
                                 if covered or format_type:
                                     self.logger.debug(
@@ -483,8 +534,14 @@ class Unzipper():
             if (
                 compression_ratio_info.get('encrypted')
                 and matched_password == ''
-                and file_ops.is_standard_archive_file(zip.path)
-                and (zip.extension or '').lower() in ('.7z', '.rar', '.zip')
+                and (
+                    file_ops.is_standard_archive_file(zip.path)
+                    or bool(
+                        zip.current_recognition()
+                        and zip.current_recognition().is_direct_archive
+                    )
+                )
+                and any(zip.is_format(fmt) for fmt in ('7z', 'rar', 'zip'))
             ):
                 return False
             namelist = list(set(namelist))
@@ -666,7 +723,16 @@ class Unzipper():
 
         first_file = '2.zip' if zip.covered else zip.file_list[0]
         for password in password_candidates:
-            args = [zip.path, output_path, password, first_file, zip.jap, zip.covered, zip.format_type]
+            args = [
+                zip.path,
+                output_path,
+                password,
+                first_file,
+                zip.jap,
+                zip.covered,
+                zip.format_type,
+                zip.current_recognition(),
+            ]
             try:
                 returncode, msg = self.driver.unzip(*args)
             except UnzipError as err:
@@ -708,8 +774,7 @@ class Unzipper():
     @staticmethod
     def _namelist_password_needs_extract_confirmation(zip: Zip) -> bool:
         """ZIP 的目录通常无需密码即可读取，不能据此锁死密码候选。"""
-        extension = (zip.extension or os.path.splitext(zip.path)[1]).lower()
-        if extension == '.zip' or zip.format_type == 'zip':
+        if zip.is_format('zip'):
             return True
         return any(
             re.search(r'\.zip\.\d{3}$', os.path.basename(path), re.IGNORECASE)
@@ -726,7 +791,16 @@ class Unzipper():
         self._emit_unzip_progress(1, total)
         progress = 1
         for file in file_list[1:]:
-            args = [zip.path, output_path, password, file, zip.jap, zip.covered, zip.format_type]
+            args = [
+                zip.path,
+                output_path,
+                password,
+                file,
+                zip.jap,
+                zip.covered,
+                zip.format_type,
+                zip.current_recognition(),
+            ]
 
             self.resource.submit(list_id, self.driver.unzip, *args)
             self.logger.debug(f"提交解压任务至进程池：{file} | {progress}/{len(file_list)} ")
@@ -755,7 +829,7 @@ class Unzipper():
         try:
             return self.driver.unzip(
                 zip.path, output_path, password, None, zip.jap, zip.covered,
-                zip.format_type,
+                zip.format_type, zip.current_recognition(),
             )
         except UnzipError as err:
             return 1, str(err)
@@ -958,16 +1032,21 @@ class Unzipper():
             unresolved_list.append(path)
 
     @staticmethod
-    def _is_probable_nested_archive(zip_entity: Zip, probe: file_ops.ArchiveProbe) -> bool:
+    def _is_probable_nested_archive(
+        zip_entity: Zip,
+        recognition: ArchiveRecognition,
+    ) -> bool:
         """内层扫描：区分真实压缩包与素材文件误判。"""
         if zip_entity.file_list:
             return True
         if zip_entity.is_encrypted() or zip_entity.compression_ratio_info.get('encrypted'):
             return True
         ext = (zip_entity.extension or '').lower()
-        if probe.is_candidate and ext in ('.zip', '.7z', '.rar'):
+        if recognition.is_candidate and ext in ('.zip', '.7z', '.rar'):
             return True
-        if probe.format_type in ('7z', 'zip', 'rar', 'gzip', 'bzip2', 'xz', 'tar'):
+        if recognition.actual_format in (
+            '7z', 'zip', 'rar', 'gzip', 'bzip2', 'xz', 'tar',
+        ):
             return True
         return False
 
@@ -1079,8 +1158,22 @@ class Unzipper():
                 return False
             if all(os.path.normcase(v) in already_norm for v in volumes):
                 return False
-            zip_entity = Zip(volumes[0], passwords, delete_after_unzip, covered=False,
-                             format_type=None)
+            context = (
+                RecognitionContext.NESTED
+                if depth > 0
+                else RecognitionContext.TOP_LEVEL
+            )
+            recognition = recognize_archive(
+                volumes[0],
+                context=context,
+                volumes=volumes,
+            )
+            zip_entity = Zip(
+                volumes[0],
+                passwords,
+                delete_after_unzip,
+                recognition=recognition,
+            )
             zip_entity.path = volumes[0]
             zip_entity.volumes = volumes
             log = ' 发现分卷压缩文件： [{}]'.format('],['.join(volumes))
@@ -1111,16 +1204,27 @@ class Unzipper():
             )
             return False
 
-        probe = file_ops.probe_archive(path, nested=depth > 0)
-        if not probe.is_candidate:
+        context = (
+            RecognitionContext.NESTED
+            if depth > 0
+            else RecognitionContext.TOP_LEVEL
+        )
+        recognition = recognize_archive(path, context=context)
+        if not recognition.is_candidate:
             self.logger.debug('跳过非压缩文件："{}"'.format(os.path.normpath(path)))
             return False
 
-        covered = probe.covered
+        covered = recognition.covered
         if file_ops.is_standard_archive_file(path):
             covered = False
-        zip_entity = Zip(path, passwords, delete_after_unzip, covered=covered,
-                         format_type=probe.format_type)
+        zip_entity = Zip(
+            path,
+            passwords,
+            delete_after_unzip,
+            covered=covered,
+            format_type=recognition.format_type,
+            recognition=recognition,
+        )
         # 路径是压缩文件，分卷只把头卷加入队列
         log = None
         if file_ops.is_volume_zip(path):
@@ -1138,15 +1242,22 @@ class Unzipper():
                 return False
             zip_entity.path = volumes[0]
             zip_entity.volumes = volumes
-            zip_entity.format_type = None  # 分卷由 7-Zip 按首卷自动识别，避免 -t7z 误判
+            zip_entity.apply_open_result(
+                None,
+                False,
+            )  # 分卷由 7-Zip 按首卷自动识别，避免 -t7z 误判
             log = ' 发现分卷压缩文件： [{}]'.format('],['.join(volumes))
 
         probe_limit = NESTED_PASSWORD_PROBE_LIMIT if depth > 0 else None
         if self.load_namelist(zip_entity, password_probe_limit=probe_limit):
-            if probe.covered and file_ops.is_disguised_archive_extension(
+            if recognition.covered and file_ops.is_disguised_archive_extension(
                 zip_entity.extension or '',
             ):
-                zip_entity.covered = True
+                zip_entity.apply_open_result(
+                    zip_entity.format_type,
+                    True,
+                    encrypted=zip_entity.is_encrypted(),
+                )
             if not log:
                 log = ' 发现压缩文件： [{}]'.format(path)
 
@@ -1161,7 +1272,7 @@ class Unzipper():
             return True
 
         if depth > 0 and not collect_unresolved:
-            if self._is_probable_nested_archive(zip_entity, probe) or (
+            if self._is_probable_nested_archive(zip_entity, recognition) or (
                 archive_registry.is_discovered(path, volumes_probe)
                 and not archive_registry.is_unzipped(path, volumes_probe)
             ):

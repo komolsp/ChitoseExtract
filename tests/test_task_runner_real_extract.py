@@ -157,6 +157,20 @@ class TaskRunnerRealExtractTests(unittest.TestCase):
             with self.subTest(fmt=fmt):
                 self._run_case(f'password_{fmt}', [source], passwords=('testpw',))
 
+    def test_encrypted_zip_renamed_to_s_finishes_without_false_success(self):
+        source_dir = os.path.join(self._tmp.name, 'renamed_password_source')
+        os.makedirs(source_dir)
+        disguised = fixtures.build_disguised_copies(
+            source_dir,
+            self.fixtures['password']['zip'],
+            ['locked.S'],
+        )
+        self._run_case(
+            'password_renamed_s',
+            [disguised['locked.S']],
+            passwords=('testpw',),
+        )
+
     def test_disguised_and_extensionless_finish_without_false_error(self):
         cases = {
             'dat': self.fixtures['disguised']['game.dat'],
@@ -183,6 +197,32 @@ class TaskRunnerRealExtractTests(unittest.TestCase):
         for name, source in self.fixtures['nested'].items():
             with self.subTest(name=name):
                 self._run_case(f'nested_{name}', [source])
+
+    def test_nested_encrypted_zip_renamed_to_s_finishes(self):
+        source_dir = os.path.join(self._tmp.name, 'nested_renamed_source')
+        os.makedirs(source_dir)
+        payload = fixtures.write_payload_file(
+            source_dir,
+            'secret.txt',
+            b'nested secret payload',
+        )
+        encrypted_zip = os.path.join(source_dir, 'inner.zip')
+        fixtures.seven_zip_add(
+            encrypted_zip,
+            payload,
+            password='testpw',
+            format_flag='zip',
+        )
+        inner_s = os.path.join(source_dir, 'inner.S')
+        shutil.copy2(encrypted_zip, inner_s)
+        outer_zip = os.path.join(source_dir, 'outer.zip')
+        fixtures.seven_zip_add(outer_zip, inner_s, format_flag='zip')
+
+        self._run_case(
+            'nested_encrypted_renamed_s',
+            [outer_zip],
+            passwords=('testpw',),
+        )
 
     def test_wrong_password_and_corrupt_archive_remain_failures(self):
         self._run_failure_case(

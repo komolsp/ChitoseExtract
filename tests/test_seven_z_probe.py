@@ -5,6 +5,7 @@ from unittest import mock
 
 from seven_z_driver import (
     GetNamelistError,
+    NoFile2ProcessError,
     SevenZDriver,
     _LARGE_SINGLE_FILE_MIN_BYTES,
     _method_is_store_encrypted,
@@ -12,6 +13,23 @@ from seven_z_driver import (
 
 
 class SevenZProbeTests(unittest.TestCase):
+    def test_unzip_rejects_stdout_no_files_with_zero_exit_code(self):
+        with mock.patch('seven_z_driver.os.path.isfile', return_value=True):
+            driver = SevenZDriver(location_path=r'C:\fake\7z.exe')
+        with mock.patch('seven_z_driver.subprocess.Popen') as popen:
+            proc = mock.MagicMock()
+            proc.communicate.return_value = (b'No files to process\r\n', b'')
+            proc.returncode = 0
+            popen.return_value = proc
+
+            with self.assertRaises(NoFile2ProcessError):
+                driver.unzip(
+                    'renamed.S',
+                    tempfile.gettempdir(),
+                    output_file='missing.txt',
+                    format_type='zip',
+                )
+
     def test_method_is_store_encrypted(self):
         self.assertTrue(_method_is_store_encrypted('Copy 7zAES'))
         self.assertTrue(_method_is_store_encrypted('Copy 7zAES:19'))

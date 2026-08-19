@@ -14,6 +14,7 @@ import filter as filter_module
 import audio_convert
 import audio_tagger
 import archive_registry
+from archive_recognition import RecognitionContext, recognize_archive
 
 from dlrenamer.runner import get_shared_scraper
 
@@ -406,8 +407,11 @@ def _list_pending_archives_in_work_root(
             continue
         if archive_registry.is_unzipped(full):
             continue
-        probe = file_ops.probe_archive(full, nested=True)
-        if not probe.is_candidate:
+        recognition = recognize_archive(
+            full,
+            context=RecognitionContext.NESTED,
+        )
+        if not recognition.is_candidate:
             ext = os.path.splitext(name)[1].lower()
             if ext not in ('.zip', '.7z', '.rar', '.001', '.ha'):
                 continue
@@ -416,8 +420,7 @@ def _list_pending_archives_in_work_root(
                 full,
                 passwords,
                 conf.del_after_reunzip,
-                covered=probe.covered,
-                format_type=probe.format_type,
+                recognition=recognition,
             ),
         )
     return pending
@@ -715,7 +718,7 @@ def _is_recoverable_generated_work_root(path: str | None) -> bool:
         if remainder and not re.fullmatch(r'RJ\d{6,12}', remainder, re.IGNORECASE):
             continue
         try:
-            if file_ops.probe_archive(sibling).is_candidate:
+            if recognize_archive(sibling).is_candidate:
                 return True
         except (OSError, ValueError):
             continue
@@ -1530,7 +1533,16 @@ def _resume_inner_from_registry(
             continue
         if archive_registry.is_unzipped(inner_path):
             continue
-        inner = Zip(inner_path, nested_passwords, conf.del_after_reunzip)
+        recognition = recognize_archive(
+            inner_path,
+            context=RecognitionContext.NESTED,
+        )
+        inner = Zip(
+            inner_path,
+            nested_passwords,
+            conf.del_after_reunzip,
+            recognition=recognition,
+        )
         _merge_zip_passwords(inner, nested_passwords)
         return inner
     return None

@@ -1,6 +1,7 @@
 import os
 
 import pk_logger
+from archive_recognition import ArchiveRecognition
 from timeline import Archive
 
 # logger = pk_logger.Pk_logger('unzip_logger', 'log.txt').add_log_handler().get_logger()
@@ -10,8 +11,14 @@ class Zip(Archive):
 
     def __init__(self, file, password_list: list | None = None, del_after_unzip: bool = False, jap: bool = False
                  , covered: bool = False, format_type: str | None = None,
-                 volumes: list = None):
+                 volumes: list = None, recognition: ArchiveRecognition | None = None):
         super(Zip, self).__init__(file)
+        self.recognition = recognition
+        if recognition is not None:
+            covered = recognition.covered
+            format_type = recognition.format_type
+            if recognition.volumes:
+                volumes = list(recognition.volumes)
         self.pw_list = []
         self.compression_ratio_info = {}
         self.del_after_unzip = del_after_unzip
@@ -47,7 +54,49 @@ class Zip(Archive):
         self.scan_password = None
 
     def is_encrypted(self) -> bool:
-        return bool(self.compression_ratio_info.get('encrypted'))
+        if self.compression_ratio_info.get('encrypted'):
+            return True
+        recognition = self.current_recognition()
+        return bool(recognition and recognition.password_required)
+
+    def current_recognition(self) -> ArchiveRecognition | None:
+        recognition = self.recognition
+        if recognition is None or not recognition.matches_current_file(self.path):
+            return None
+        return recognition
+
+    def apply_open_result(
+        self,
+        format_type: str | None,
+        covered: bool,
+        *,
+        encrypted: bool | None = None,
+    ):
+        """同步成功的打开策略；旧字段保留给现有调用方。"""
+        self.format_type = format_type
+        self.covered = covered
+        recognition = self.current_recognition()
+        if recognition is not None:
+            self.recognition = recognition.with_open_result(
+                format_type=format_type,
+                covered=covered,
+                encrypted=encrypted,
+            )
+
+    def is_format(self, format_type: str) -> bool:
+        recognition = self.current_recognition()
+        if recognition is not None and recognition.is_format(format_type):
+            return True
+        wanted = (format_type or '').lower()
+        if (self.format_type or '').lower() == wanted:
+            return True
+        extension = (self.extension or os.path.splitext(self.path)[1]).lower()
+        extension_formats = {
+            'zip': ('.zip', '.cbz', '.jar'),
+            '7z': ('.7z', '.cb7'),
+            'rar': ('.rar', '.cbr'),
+        }
+        return extension in extension_formats.get(wanted, ())
 
     def container_requires_password(self) -> bool:
         """压缩包标记为加密时，须先通过 7z l 验证密码。"""

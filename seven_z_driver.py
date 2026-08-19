@@ -6,6 +6,7 @@ import sys
 import app_paths
 import file_ops
 import zip_wz_aes
+from archive_recognition import ArchiveRecognition, ExtractBackend
 
 # 用于探测「仅内容加密」：错密码仍能通过 7z l 列目录
 _PROBE_INVALID_PASSWORD = '__pk_invalid_probe_password__'
@@ -76,23 +77,33 @@ class SevenZDriver:
         return 0, password
 
     @staticmethod
-    def _should_use_pyzipper(compress_file: str, covered: bool) -> bool:
+    def _should_use_pyzipper(
+        compress_file: str,
+        covered: bool,
+        recognition: ArchiveRecognition | None = None,
+    ) -> bool:
         """pyzipper 仅处理单文件 WzAES ZIP；经典跨卷 ZIP 必须交给 7-Zip。"""
+        if recognition is not None and recognition.matches_current_file(compress_file):
+            return (
+                not covered
+                and recognition.backend is ExtractBackend.WZ_AES
+                and not recognition.is_volume
+            )
         return (
             not covered
-            and compress_file.lower().endswith('.zip')
             and not file_ops.is_volume_zip(compress_file, readonly=True)
             and file_ops.zip_uses_wz_aes(compress_file)
         )
 
     def unzip(self, compress_file: str, output_path: str, password: str = '', output_file: str = None,
               jap: bool = False,
-              covered: bool = False, format_type: str | None = None):
+              covered: bool = False, format_type: str | None = None,
+              recognition: ArchiveRecognition | None = None):
         if not compress_file:
             raise UnzipError('压缩文件未设置')
         if not output_path:
             raise UnzipError('输出路径未设置')
-        if self._should_use_pyzipper(compress_file, covered):
+        if self._should_use_pyzipper(compress_file, covered, recognition):
             return self._unzip_wz_aes_zip(
                 compress_file, output_path, password, output_file,
             )
@@ -113,21 +124,26 @@ class SevenZDriver:
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=self.work_dir, close_fds=True, **_SUBPROCESS_FLAGS)
         out, err = result.communicate()
+        out_msg = _decode_7z_text(out) if out else ''
+        err_msg = _decode_7z_text(err) if err else ''
+        combined_msg = '\n'.join(
+            message for message in (err_msg, out_msg) if message
+        )
+        if "Cannot delete output file" in combined_msg:
+            raise CannotDeleteOutputFile(combined_msg)
+        if "No files to process" in combined_msg:
+            raise NoFile2ProcessError(combined_msg)
+        if "Wrong password" in combined_msg:
+            raise UnzipError(combined_msg)
         if err:
-            msg = _decode_7z_text(err)
-            if "Cannot delete output file" in msg:
-                raise CannotDeleteOutputFile(msg)
-            if "No files to process" in msg:
-                raise NoFile2ProcessError(msg)
-            if "Wrong password" in msg:
-                raise UnzipError(msg)
-            raise UnzipError(msg)
+            raise UnzipError(err_msg)
         if result.returncode != 0:
-            raise UnzipError(f'7-Zip 退出码 {result.returncode}')
+            raise UnzipError(combined_msg or f'7-Zip 退出码 {result.returncode}')
         return result.returncode, password
 
     def get_namelist(self, compress_file: str, password: str = '', jap: bool = False, covered: bool = False,
-                     format_type: str | None = None):
+                     format_type: str | None = None,
+                     recognition: ArchiveRecognition | None = None):
         pattern = r'^20\d{2}-[01]\d-[0-3]\d [0-2]\d:[0-6]\d:[0-6]\d \.\S{4}.{28}(.+?)[\r\n]'
         ratio_pattern = r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+(\d+)\s+(\d+)\s+\d+\s+files(?:,\s+\d+\s+folders)?\s*$'
         namelist = []
@@ -168,16 +184,26 @@ class SevenZDriver:
                     elif '7zAES' in line or 'WzAES' in line or 'AES-256' in line:
                         compression_ratio_info["encrypted"] = True
 
-        if namelist and compress_file.lower().endswith('.zip'):
-            if file_ops.zip_has_encrypted_entries(compress_file):
-                compression_ratio_info["encrypted"] = True
+        # ZIP 可能被改成 .S/.dat 等任意后缀，加密检测必须按内容，
+        # 否则 ZipCrypto 条目会被当成无密码压缩包。
+        recognized_encrypted = bool(
+            recognition is not None
+            and recognition.matches_current_file(compress_file)
+            and recognition.password_required
+        )
+        if namelist and (
+            recognized_encrypted
+            or file_ops.zip_has_encrypted_entries(compress_file)
+        ):
+            compression_ratio_info["encrypted"] = True
 
         return namelist, compression_ratio_info
 
     def test_archive(self, compress_file: str, password: str = '', jap: bool = False,
-                     covered: bool = False, format_type: str | None = None) -> tuple[bool, str]:
+                     covered: bool = False, format_type: str | None = None,
+                     recognition: ArchiveRecognition | None = None) -> tuple[bool, str]:
         """运行 7z t 校验压缩包结构/完整性（比 7z l 更严格）。"""
-        if self._should_use_pyzipper(compress_file, covered):
+        if self._should_use_pyzipper(compress_file, covered, recognition):
             ok, msg = zip_wz_aes.test_password(compress_file, password)
             return ok, msg
         cmd = [self.location_path, 't', '-p{}'.format(password), compress_file]
