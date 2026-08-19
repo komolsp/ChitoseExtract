@@ -382,10 +382,17 @@ def _normalize_nested_scan_root(
 def _list_pending_archives_in_work_root(
     work_root: str | None,
     passwords: list[str],
+    *,
+    excluded_paths: list[str] | None = None,
 ) -> list[Zip]:
     """在作品目录中直接枚举尚未解压的压缩包（find_zip 漏扫时的兜底）。"""
     if not work_root or not os.path.isdir(work_root):
         return []
+    excluded = {
+        os.path.normcase(os.path.normpath(path))
+        for path in (excluded_paths or [])
+        if isinstance(path, str) and path
+    }
     pending: list[Zip] = []
     try:
         names = os.listdir(work_root)
@@ -394,6 +401,8 @@ def _list_pending_archives_in_work_root(
     for name in names:
         full = os.path.join(work_root, name)
         if not os.path.isfile(full):
+            continue
+        if os.path.normcase(os.path.normpath(full)) in excluded:
             continue
         if archive_registry.is_unzipped(full):
             continue
@@ -1638,7 +1647,11 @@ def _enqueue_nested_archives(
                     ),
                 )
     if not zip_list:
-        for inner in _list_pending_archives_in_work_root(new_path, nested_passwords):
+        for inner in _list_pending_archives_in_work_root(
+            new_path,
+            nested_passwords,
+            excluded_paths=nested_unresolved,
+        ):
             if _zip_path_already_queued(inner.path):
                 continue
             zip_list.append(inner)
