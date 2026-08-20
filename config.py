@@ -27,6 +27,12 @@ _CONFIG_DEFAULTS: dict[str, Any] = {
     'seven_z_mmt': 0,
     'blacklist': [],
 }
+_STRICT_TOP_LEVEL_BOOLEAN_FIELDS = (
+    'logical_deletion',
+    'del_after_unzip',
+    'del_after_reunzip',
+    'auto_next',
+)
 
 _AUDIO_CONVERT_DEFAULTS: dict[str, Any] = {
     'source_extensions': ['.wav', '.aif', '.aiff'],
@@ -66,17 +72,50 @@ DEFAULT_WORKFLOW_STEPS: dict[str, bool] = {
 }
 
 
+class ConfigError(Exception):
+    """配置文件缺少关键项或格式不正确。"""
+
+    def __init__(self, message: str, details: list[str] | None = None):
+        self.details = list(details or [])
+        detail_text = '\n'.join(f'  • {item}' for item in self.details)
+        if detail_text:
+            message = f'{message.rstrip()}\n\n{detail_text}'
+        super().__init__(message)
+
+
+def _require_yaml_bool(value: Any, field_path: str) -> bool:
+    """只接受 YAML 原生布尔值，防止非空字符串 ``"false"`` 被当作真。"""
+    if type(value) is not bool:
+        raise ConfigError(
+            '配置文件中的布尔值格式错误：',
+            [
+                f'{field_path} — 必须写为 true 或 false（不要加引号；'
+                f'当前类型：{type(value).__name__}）',
+            ],
+        )
+    return value
+
+
 def resolve_workflow_steps(raw: Any) -> dict[str, bool]:
     """从 config.workflow_steps 解析各步骤开关。"""
     steps = dict(DEFAULT_WORKFLOW_STEPS)
-    if not isinstance(raw, dict):
+    if raw is None:
         return steps
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            '配置文件格式错误：',
+            ['workflow_steps — 必须是 YAML 映射（键值对）'],
+        )
     # 兼容旧版 insert_rj 配置
     if 'archive' not in raw and 'insert_rj' in raw:
-        steps['archive'] = bool(raw['insert_rj'])
+        steps['archive'] = _require_yaml_bool(
+            raw['insert_rj'], 'workflow_steps.insert_rj',
+        )
     for step_id in WORKFLOW_STEP_IDS:
         if step_id in raw:
-            steps[step_id] = bool(raw[step_id])
+            steps[step_id] = _require_yaml_bool(
+                raw[step_id], f'workflow_steps.{step_id}',
+            )
     return steps
 
 
@@ -107,16 +146,6 @@ def build_run_pipeline(
             pipeline.append(step_id)
     return pipeline
 
-
-class ConfigError(Exception):
-    """配置文件缺少关键项或格式不正确。"""
-
-    def __init__(self, message: str, details: list[str] | None = None):
-        self.details = list(details or [])
-        detail_text = '\n'.join(f'  • {item}' for item in self.details)
-        if detail_text:
-            message = f'{message.rstrip()}\n\n{detail_text}'
-        super().__init__(message)
 
 _yaml: YAML | None = None
 
@@ -162,6 +191,62 @@ def _save_yaml(path: str, data):
         _get_yaml().dump(data, conf)
 
 
+def _append_bool_field_error(
+        errors: list[str], section: dict, key: str, field_path: str) -> None:
+    if key not in section or type(section[key]) is bool:
+        return
+    errors.append(
+        f'{field_path} — 必须写为 true 或 false（不要加引号；'
+        f'当前类型：{type(section[key]).__name__}）'
+    )
+
+
+def _config_section(
+        raw: dict, key: str, errors: list[str], field_path: str | None = None,
+        ) -> dict | None:
+    field_path = field_path or key
+    section = raw.get(key)
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        errors.append(f'{field_path} — 必须是 YAML 映射（键值对）')
+        return None
+    return section
+
+
+def _validate_config_boolean_types(raw: dict) -> list[str]:
+    """集中校验会控制删除、过滤或自动流程的布尔配置。"""
+    errors: list[str] = []
+    for key in _STRICT_TOP_LEVEL_BOOLEAN_FIELDS:
+        _append_bool_field_error(errors, raw, key, key)
+
+    workflow = _config_section(raw, 'workflow_steps', errors)
+    if workflow is not None:
+        for key in (*WORKFLOW_STEP_IDS, 'insert_rj'):
+            _append_bool_field_error(errors, workflow, key, f'workflow_steps.{key}')
+
+    filter_section = _config_section(raw, 'filter', errors)
+    if filter_section is not None:
+        for key in ('filter_dir', 'filte_dir'):
+            _append_bool_field_error(errors, filter_section, key, f'filter.{key}')
+        rules = _config_section(filter_section, 'rules', errors, 'filter.rules')
+        if rules is not None:
+            for key in rules:
+                _append_bool_field_error(errors, rules, key, f'filter.rules.{key}')
+
+    audio_convert = _config_section(raw, 'audio_convert', errors)
+    if audio_convert is not None:
+        _append_bool_field_error(
+            errors, audio_convert, 'delete_source', 'audio_convert.delete_source',
+        )
+
+    audio_tag = _config_section(raw, 'audio_tag', errors)
+    if audio_tag is not None:
+        for key in ('embed_cover', 'save_cover_jpg', 'force_retag'):
+            _append_bool_field_error(errors, audio_tag, key, f'audio_tag.{key}')
+    return errors
+
+
 def _prepare_config(raw: dict | None) -> dict:
     if raw is None:
         raise ConfigError(
@@ -177,7 +262,8 @@ def _prepare_config(raw: dict | None) -> dict:
     merged = dict(raw)
     applied_defaults: list[str] = []
     for key, default in _CONFIG_DEFAULTS.items():
-        if key not in merged or merged[key] is None:
+        if key not in merged or (
+                merged[key] is None and key not in _STRICT_TOP_LEVEL_BOOLEAN_FIELDS):
             merged[key] = default
             applied_defaults.append(key)
 
@@ -195,6 +281,13 @@ def _prepare_config(raw: dict | None) -> dict:
         raise ConfigError(
             '配置文件缺少关键项，请打开 config.yaml 补全后重试：',
             critical_errors,
+        )
+
+    boolean_errors = _validate_config_boolean_types(merged)
+    if boolean_errors:
+        raise ConfigError(
+            '配置文件中的布尔值格式错误，请修正后重试：',
+            boolean_errors,
         )
 
     if applied_defaults:
