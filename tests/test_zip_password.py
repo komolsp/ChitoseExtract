@@ -14,6 +14,19 @@ from zip import Zip
 
 class ZipPasswordTests(unittest.TestCase):
 
+    def test_extract_password_verification_can_be_explicitly_invalidated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.zip')
+            with open(path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+            archive = Zip(path, ['secret'])
+            archive.mark_extract_password_verified('secret')
+
+            archive.invalidate_extract_password_verification()
+
+            self.assertFalse(archive.is_extract_password_verified())
+            self.assertEqual(archive.verified_password(), '')
+
     def test_encrypted_container_requires_password(self):
 
         archive = Zip(r'D:\work\RJ01620216.7z', ['secret'])
@@ -74,11 +87,96 @@ class ZipPasswordTests(unittest.TestCase):
 
         self.assertFalse(archive.container_requires_password())
 
+    def test_namelist_and_extract_password_states_are_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.zip')
+            with open(path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+
+            archive = Zip(path, ['candidate', 'correct'])
+            archive.file_list = ['payload.bin']
+            archive.compression_ratio_info = {'encrypted': True}
+            archive.mark_namelist_scanned('candidate')
+
+            self.assertTrue(archive.is_namelist_current())
+            self.assertEqual(archive.namelist_password(), 'candidate')
+            self.assertFalse(archive.is_extract_password_verified())
+            self.assertEqual(archive.verified_password(), '')
+
+            archive.mark_extract_password_verified('correct')
+
+            self.assertTrue(archive.is_extract_password_verified())
+            self.assertEqual(archive.verified_password(), 'correct')
+            self.assertEqual(archive.namelist_password(), 'candidate')
+
+            archive.invalidate_namelist_scan()
+
+            self.assertFalse(archive.is_namelist_current())
+            self.assertTrue(archive.is_extract_password_verified())
+            self.assertEqual(archive.verified_password(), 'correct')
+
+            with open(path, 'ab') as fh:
+                fh.write(b'changed')
+
+            self.assertFalse(archive.is_extract_password_verified())
+            self.assertEqual(archive.verified_password(), '')
+            self.assertEqual(archive.namelist_password(), '')
+
 
 
 
 
 class FileOpsCoveredStrategyTests(unittest.TestCase):
+
+    def test_smallest_zip_member_returns_none_without_a_match(self):
+        import file_ops
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, 'probe.zip')
+            with zipfile.ZipFile(zip_path, 'w') as zf:
+                zf.writestr('present.txt', b'x')
+
+            self.assertIsNone(file_ops.zip_smallest_probe_member(zip_path, []))
+            self.assertIsNone(file_ops.zip_smallest_probe_member(
+                zip_path, ['missing.txt'],
+            ))
+
+    def test_smallest_zip_member_prefers_encrypted_candidate(self):
+        import file_ops
+        import zipfile
+
+        plain = zipfile.ZipInfo('plain.bin')
+        plain.file_size = 1
+        plain.flag_bits = 0
+        encrypted = zipfile.ZipInfo('encrypted.bin')
+        encrypted.file_size = 1024
+        encrypted.flag_bits = 1
+        opened = mock.MagicMock()
+        opened.__enter__.return_value.infolist.return_value = [plain, encrypted]
+
+        with mock.patch.object(zipfile, 'ZipFile', return_value=opened):
+            selected = file_ops.zip_smallest_probe_member(
+                'probe.zip', ['plain.bin', 'encrypted.bin'],
+            )
+
+        self.assertEqual(selected, 'encrypted.bin')
+
+    def test_smallest_zip_member_matches_seven_zip_question_wildcard(self):
+        import file_ops
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, 'probe.zip')
+            with zipfile.ZipFile(zip_path, 'w') as zf:
+                zf.writestr('small_file.txt', b'x')
+                zf.writestr('large.bin', b'x' * 1024)
+
+            selected = file_ops.zip_smallest_probe_member(
+                zip_path, ['small?file.txt', 'large.bin'],
+            )
+
+            self.assertEqual(selected, 'small?file.txt')
 
     def test_standard_zip_disallows_covered_strategy(self):
 
@@ -119,6 +217,95 @@ class FileOpsCoveredStrategyTests(unittest.TestCase):
 
 
 class UnzipperOuterPasswordTests(unittest.TestCase):
+
+    def test_resolve_encrypted_password_reuses_extract_verified_password(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.7z')
+            with open(path, 'wb') as fh:
+                fh.write(b'7z\xbc\xaf\x27\x1c' + b'\x00' * 16)
+            archive = Zip(path, ['secret'])
+            archive.compression_ratio_info = {'encrypted': True}
+            archive.mark_extract_password_verified('secret')
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+
+            with mock.patch.object(unzipper, 'load_namelist') as load_namelist:
+                self.assertTrue(unzipper._resolve_encrypted_password(archive))
+
+            load_namelist.assert_not_called()
+
+    def test_covered_password_probe_uses_carrier_member(self):
+        from unzipper import Unzipper
+
+        archive = Zip('carrier.jpg', ['secret'], covered=True)
+        archive.file_list = ['payload.bin']
+
+        self.assertEqual(Unzipper._password_probe_member(archive), '2.zip')
+
+    def test_verified_7z_accepts_usable_partial_inner_extract(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'outer.7z')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(path, 'wb') as fh:
+                fh.write(b'7z\xbc\xaf\x27\x1c' + b'\x00' * 16)
+            archive = Zip(path, ['secret'])
+            archive.file_list = ['inner.zip']
+            archive.compression_ratio_info = {'encrypted': True}
+            archive.mark_namelist_scanned('secret')
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper._run_single_unzip = mock.MagicMock(return_value=(
+                1,
+                'ERROR: CRC Failed in encrypted file: inner.zip',
+            ))
+            unzipper._output_has_usable_partial_extract = mock.MagicMock(
+                return_value=True,
+            )
+
+            self.assertTrue(unzipper.single_threaded_unzip(
+                archive, output_path, known_password=True,
+            ))
+
+            self.assertTrue(archive.is_extract_password_verified())
+            self.assertEqual(archive.verified_password(), 'secret')
+
+    def test_encrypted_extract_skips_garbage_success_and_tries_next_password(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.7z')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(path, 'wb') as fh:
+                fh.write(b'7z\xbc\xaf\x27\x1c' + b'\x00' * 16)
+            archive = Zip(path, ['first', 'second'])
+            archive.file_list = ['payload.bin']
+            archive.compression_ratio_info = {'encrypted': True}
+            archive.mark_namelist_scanned('first')
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper._run_single_unzip = mock.MagicMock(
+                side_effect=[(0, ''), (0, '')],
+            )
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                side_effect=[True, False],
+            )
+
+            self.assertTrue(unzipper.single_threaded_unzip(
+                archive, output_path, known_password=True,
+            ))
+
+            self.assertEqual(
+                [call.args[2] for call in unzipper._run_single_unzip.call_args_list],
+                ['first', 'second'],
+            )
+            self.assertEqual(archive.verified_password(), 'second')
+
 
     def test_encrypted_zip_nonempty_candidate_avoids_full_archive_test(self):
         from unzip_process_pool import ProcessResourceManager
@@ -239,6 +426,85 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
 
 
             self.assertFalse(unzipper.single_threaded_unzip(zip_obj, output_path, known_password=True))
+
+    def test_zip_list_only_password_does_not_accept_partial_extract(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outer_path = os.path.join(tmp, 'outer.zip')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(outer_path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+
+            zip_obj = Zip(outer_path, ['wrong', 'correct'], False)
+            zip_obj.file_list = ['inner.zip', 'payload.bin']
+            zip_obj.compression_ratio_info = {'encrypted': True}
+            zip_obj.mark_namelist_scanned('wrong')
+
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper._run_single_unzip = mock.MagicMock(
+                side_effect=[
+                    (1, 'ERROR: CRC Failed in encrypted file. Wrong password? : payload.bin'),
+                    (0, ''),
+                ],
+            )
+            unzipper._output_has_usable_partial_extract = mock.MagicMock(
+                return_value=True,
+            )
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                return_value=False,
+            )
+
+            self.assertTrue(
+                unzipper.single_threaded_unzip(
+                    zip_obj, output_path, known_password=True,
+                )
+            )
+            self.assertEqual(
+                [call.args[2] for call in unzipper._run_single_unzip.call_args_list],
+                ['wrong', 'correct'],
+            )
+            self.assertEqual(zip_obj.verified_password(), 'correct')
+
+    def test_password_collision_confirms_listable_zip_candidate_by_extracting(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outer_path = os.path.join(tmp, 'outer.zip')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(outer_path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+
+            zip_obj = Zip(outer_path, ['wrong', 'correct'], False)
+            zip_obj.file_list = ['payload.bin']
+            zip_obj.compression_ratio_info = {'encrypted': True}
+            zip_obj.mark_namelist_scanned('wrong')
+
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper.driver.unzip = mock.MagicMock(
+                side_effect=[
+                    (1, 'Wrong password'),
+                    (1, 'Wrong password'),
+                    (0, ''),
+                ],
+            )
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                return_value=False,
+            )
+
+            self.assertEqual(
+                unzipper.password_collision(zip_obj, output_path), 'correct',
+            )
+            self.assertEqual(
+                [call.args[2] for call in unzipper.driver.unzip.call_args_list],
+                ['wrong', '', 'correct'],
+            )
+            self.assertTrue(zip_obj.is_extract_password_verified())
+            self.assertEqual(zip_obj.verified_password(), 'correct')
 
     def test_disguised_mp3_tries_password_library(self):
         from unzip_process_pool import ProcessResourceManager
@@ -375,6 +641,52 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
                 ['wrong', '', 'correct'],
             )
 
+    def test_zip_list_match_does_not_drop_earlier_password_candidates(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.zip')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+            archive = Zip(path, ['correct', 'list-only'], False)
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+
+            def fake_namelist(*_args, password='', **_kwargs):
+                if password in ('', 'correct'):
+                    return [], {'encrypted': True}
+                return ['payload.bin'], {'encrypted': True}
+
+            unzipper._namelist_strategies = mock.MagicMock(
+                return_value=[(None, False)],
+            )
+            unzipper.driver.get_namelist = mock.MagicMock(
+                side_effect=fake_namelist,
+            )
+
+            self.assertTrue(unzipper.load_namelist(archive))
+            self.assertEqual(archive.namelist_password(), 'list-only')
+            self.assertFalse(archive.is_extract_password_verified())
+            self.assertIn('correct', archive.pw_list)
+
+            unzipper._run_single_unzip = mock.MagicMock(
+                side_effect=[(1, 'Wrong password'), (0, '')],
+            )
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                return_value=False,
+            )
+            self.assertTrue(
+                unzipper.single_threaded_unzip(
+                    archive, output_path, known_password=True,
+                )
+            )
+            self.assertEqual(
+                [call.args[2] for call in unzipper._run_single_unzip.call_args_list],
+                ['list-only', 'correct'],
+            )
+
     def test_load_namelist_rejects_7z_list_only_password(self):
         from unzip_process_pool import ProcessResourceManager
         from unzipper import Unzipper
@@ -387,7 +699,10 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
             zip_obj = Zip(outer_path, ['RJ01646431', 'yisiki'], False)
             unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
             unzipper.driver.probe_content_encrypted_single_block = mock.MagicMock(
-                return_value={'content_encrypted_solid': False},
+                return_value={
+                    'content_encrypted_solid': False,
+                    'content_only_encryption': True,
+                },
             )
             unzipper.driver.get_namelist = mock.MagicMock(
                 side_effect=[
@@ -400,7 +715,86 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
             )
 
             self.assertTrue(unzipper.load_namelist(zip_obj))
-            self.assertEqual(zip_obj.verified_password(), 'yisiki')
+            self.assertEqual(zip_obj.namelist_password(), 'yisiki')
+            self.assertFalse(zip_obj.is_extract_password_verified())
+
+    def test_header_encrypted_7z_skips_full_test_but_extract_confirms_password(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outer_path = os.path.join(tmp, 'header-encrypted.7z')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(outer_path, 'wb') as fh:
+                fh.write(b'7z\xbc\xaf\x27\x1c' + b'\x00' * 16)
+
+            zip_obj = Zip(outer_path, ['wrong', 'correct'], False)
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper.driver.probe_content_encrypted_single_block = mock.MagicMock(
+                return_value={
+                    'content_encrypted_solid': False,
+                    'content_only_encryption': False,
+                },
+            )
+            unzipper.driver.get_namelist = mock.MagicMock(
+                return_value=(['inner.zip'], {'encrypted': True}),
+            )
+            unzipper.driver.test_archive = mock.MagicMock()
+            unzipper._run_single_unzip = mock.MagicMock(
+                side_effect=[(1, 'Wrong password'), (0, '')],
+            )
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                return_value=False,
+            )
+
+            self.assertTrue(unzipper.load_namelist(zip_obj))
+            unzipper.driver.test_archive.assert_not_called()
+            self.assertEqual(zip_obj.namelist_password(), 'wrong')
+            self.assertFalse(zip_obj.is_extract_password_verified())
+
+            self.assertTrue(
+                unzipper.single_threaded_unzip(
+                    zip_obj, output_path, known_password=True,
+                )
+            )
+            self.assertEqual(
+                [call.args[2] for call in unzipper._run_single_unzip.call_args_list],
+                ['wrong', 'correct'],
+            )
+            self.assertEqual(zip_obj.verified_password(), 'correct')
+
+    def test_password_collision_uses_smallest_zip_member_first(self):
+        import file_ops
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'normal.zip')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(path, 'wb') as fh:
+                fh.write(b'PK\x03\x04' + b'\x00' * 16)
+            archive = Zip(path, ['secret'], False)
+            archive.file_list = ['large.bin', 'small.txt']
+            archive.compression_ratio_info = {'encrypted': False}
+
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper.driver.unzip = mock.MagicMock(return_value=(0, ''))
+            unzipper._extract_is_wrong_password_garbage = mock.MagicMock(
+                return_value=False,
+            )
+
+            with mock.patch.object(
+                file_ops, 'zip_smallest_probe_member', return_value='small.txt',
+            ):
+                self.assertEqual(
+                    unzipper.password_collision(archive, output_path), 'secret',
+                )
+
+            self.assertEqual(archive.file_list, ['small.txt', 'large.bin'])
+            self.assertEqual(unzipper.driver.unzip.call_args.args[3], 'small.txt')
+            self.assertFalse(archive.is_extract_password_verified())
 
     def test_load_namelist_skips_library_for_content_encrypted_solid_7z(self):
         from unzip_process_pool import ProcessResourceManager
@@ -432,7 +826,8 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
             unzipper.driver.test_archive = mock.MagicMock(return_value=(True, ''))
 
             self.assertTrue(unzipper.load_namelist(zip_obj))
-            self.assertEqual(zip_obj.verified_password(), 'yisiki')
+            self.assertEqual(zip_obj.namelist_password(), 'yisiki')
+            self.assertFalse(zip_obj.is_extract_password_verified())
             unzipper.driver.get_namelist.assert_called_once()
             self.assertEqual(
                 unzipper.driver.get_namelist.call_args.kwargs.get('password'), 'yisiki',
@@ -508,6 +903,7 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
                 encryption=pyzipper.WZ_AES,
             ) as zf:
                 zf.setpassword(b'secret')
+                zf.writestr('folder/', b'')
                 zf.write(payload, 'inner.bin')
 
             self.assertTrue(file_ops.zip_uses_wz_aes(path))

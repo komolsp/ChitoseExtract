@@ -13,6 +13,8 @@ class RunStatusManual7zTests(unittest.TestCase):
         self.assertEqual(_ops_label('rename_failed'), '重命名失败')
         self.assertEqual(_ops_label('convert_audio_failed'), '转换失败')
         self.assertEqual(_ops_label('tag_audio_failed'), '写入元数据失败')
+        self.assertEqual(_ops_label('convert_audio_skip'), '已跳过转换')
+        self.assertEqual(_ops_label('tag_audio_skip'), '已跳过写入元数据')
 
     def test_run_status_summary_puts_long_manual_detail_in_banner(self):
         zip_obj = Zip(r'D:\下载\RJ01620216.7z', [], False)

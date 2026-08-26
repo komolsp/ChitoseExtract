@@ -47,6 +47,27 @@ def sort_passwords(passwords: list, last_hit_weight: float = 0.5) -> list:
     )
 
 
+def prioritize_latest_hits(passwords: list[Password]) -> list[Password]:
+    """将最近一次命中的密码放到快速通道，其余保持原排序。"""
+    ordered = sort_passwords(passwords)
+
+    def get_last_hit_date(pwd: Password) -> datetime.date | None:
+        try:
+            return datetime.datetime.strptime(pwd.last_hit_date, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return None
+
+    dated = [(pwd, get_last_hit_date(pwd)) for pwd in ordered]
+    valid_dates = [date for _pwd, date in dated if date is not None]
+    if not valid_dates:
+        return ordered
+
+    latest = max(valid_dates)
+    fast_lane = [pwd for pwd, date in dated if date == latest]
+    fast_lane.sort(key=lambda pwd: pwd.hit_count, reverse=True)
+    return fast_lane + [pwd for pwd in ordered if pwd not in fast_lane]
+
+
 def read_password(path: str = PASSWORD_PATH):
     tmp = []
     if not os.path.isfile(path):

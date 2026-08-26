@@ -475,14 +475,6 @@ class Renamer(object):
             Renamer.logger.warning('无法设置文件夹属性 [{}]: {}'.format(path, err))
 
     @staticmethod
-    def _win_clear_file_attributes(path: str, attrs: int):
-        try:
-            current = win32api.GetFileAttributes(Renamer._win_path(path))
-            Renamer._win_set_file_attributes(path, current & ~attrs)
-        except OSError:
-            pass
-
-    @staticmethod
     def _desktop_ini_content(icon_name: str) -> str:
         """使用相对路径，文件夹重命名后图标引用仍然有效。"""
         return (

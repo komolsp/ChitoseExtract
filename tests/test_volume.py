@@ -522,7 +522,13 @@ class VolumeResolveTest(unittest.TestCase):
             self.assertTrue(z.is_namelist_current())
             z.pw_list.insert(0, 'other')
             self.assertTrue(z.is_namelist_current())
-            self.assertEqual(z.verified_password(), 'pw')
+            self.assertEqual(z.namelist_password(), 'pw')
+            self.assertFalse(z.is_extract_password_verified())
+            original_mtime = os.stat(path).st_mtime_ns
+            with open(path, 'ab') as fh:
+                fh.write(b'more')
+            os.utime(path, ns=(original_mtime, original_mtime))
+            self.assertFalse(z.is_namelist_current())
             z.invalidate_namelist_scan()
             self.assertFalse(z.is_namelist_current())
         finally:

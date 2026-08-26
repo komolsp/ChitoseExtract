@@ -15,7 +15,6 @@ from seven_z_driver import (
     JapDecodeError,
     GetNamelistError,
     NoFile2ProcessError,
-    CannotDeleteOutputFile,
     UnzipError,
     is_password_error_message,
 )
@@ -144,10 +143,13 @@ class Unzipper():
         return self._output_has_usable_partial_extract(work_root or '')
 
     def _can_accept_partial_inner_extract(self, zip: Zip, msg: str, *, verified: bool) -> bool:
-        """外层密码已由 7z l 验证，仅内层加密项解压报错。"""
+        """外层密码已被可靠验证，仅内层加密项解压报错。"""
+        if self._namelist_password_needs_extract_confirmation(zip):
+            # ZIP 使用错误密码通常也能列出目录，不能把目录扫描状态当作验密成功。
+            return False
         if not verified or not self._is_nested_encrypted_item_error(msg or ''):
             return False
-        password = zip.verified_password()
+        password = zip.namelist_password()
         return bool(password)
 
     def _extract_is_wrong_password_garbage(self, output_path: str) -> bool:
@@ -297,7 +299,7 @@ class Unzipper():
         format_type: str | None,
         encrypted: bool,
     ) -> bool:
-        """7z l 对加密 .7z/.rar 可能误接受错密码，须再用 7z t 确认。"""
+        """仅在目录可被错密码读取的加密包上保留全包 7z t 强校验。"""
         if not encrypted:
             return True
         ext = (zip.extension or os.path.splitext(compress_file)[1]).lower()
@@ -308,6 +310,14 @@ class Unzipper():
             # ZIP（包括改名后缀、AES/传统加密及分卷）常可在无密码时列出目录；
             # 此处只排除空密码，不做全包 7z t。正式解压会按候选密码
             # 依次尝试，并以 7-Zip 的退出码完成最终校验，避免整包读取两次。
+            return bool(password)
+        if (
+            zip.is_format('7z')
+            and zip.password_probe_info.get('content_only_encryption') is False
+        ):
+            # 头部加密 7z 已由独立错密码探针确认：错密码无法列目录。
+            # 此处只保留非空候选，最终正确性仍由随后的完整 7z x + CRC 决定，
+            # 避免先 7z t、再 7z x 对大包做两次全量读取。
             return bool(password)
         recognition = zip.current_recognition()
         is_direct_known_archive = bool(
@@ -382,6 +392,7 @@ class Unzipper():
             covered=zip.covered,
             format_type=zip.format_type,
         )
+        zip.password_probe_info = dict(probe)
         if not probe.get('content_encrypted_solid'):
             return None
 
@@ -517,8 +528,9 @@ class Unzipper():
                     if volume_namelist:
                         namelist.extend(volume_namelist)
                         matched_password = password
-                        start_at = passwords.index(password)
-                        passwords = passwords[start_at:]
+                        if not self._namelist_password_needs_extract_confirmation(zip):
+                            start_at = passwords.index(password)
+                            passwords = passwords[start_at:]
                         break
                 else:
                     break
@@ -544,7 +556,7 @@ class Unzipper():
                 and any(zip.is_format(fmt) for fmt in ('7z', 'rar', 'zip'))
             ):
                 return False
-            namelist = list(set(namelist))
+            namelist = list(dict.fromkeys(namelist))
             if len(namelist) == 1:
                 rj = re.compile(r'[RBV]J(\d{6}|\d{8})(?!\d+)').search(namelist[0].upper())
                 if rj and rj.group() not in passwords:
@@ -553,6 +565,10 @@ class Unzipper():
             zip.file_list = namelist
             zip.compression_ratio_info = compression_ratio_info
             zip.mark_namelist_scanned(matched_password)
+            if compression_ratio_info.get('encrypted') and matched_password:
+                self.logger.info(
+                    '密码候选已匹配，等待完整解压校验： [{}]'.format(zip.path),
+                )
             return True
         return False
 
@@ -571,8 +587,10 @@ class Unzipper():
 
     def _resolve_encrypted_password(self, zip: Zip) -> bool:
         """取得可用的非空密码候选；最终正确性由正式解压退出码确认。"""
-        if zip.is_namelist_current():
+        if zip.is_extract_password_verified():
             return bool(zip.verified_password())
+        if zip.is_namelist_current():
+            return bool(zip.namelist_password())
         return self.load_namelist(zip)
 
     def unzip(self, zip: Zip, output_path, thread_threshold_mb, thread_compression_ratio):
@@ -598,7 +616,7 @@ class Unzipper():
         if single_op:
             self._emit_unzip_progress(0, 1)
 
-        # 列目录时已验证密码：优先整包解压，避免对每个候选密码重复试探
+        # 已取得目录密码候选：优先整包解压，并由退出码完成真正的密码验证。
         if zip.is_namelist_current() and zip.pw_list:
             if self.single_threaded_unzip(zip, output_path, known_password=True):
                 return output_path
@@ -703,12 +721,12 @@ class Unzipper():
         from volume.probe import try_expand_volumes
 
         if zip.container_requires_password():
-            if self._resolve_encrypted_password(zip):
-                return zip.verified_password()
-            return None
+            if not self._resolve_encrypted_password(zip):
+                return None
+            # 目录扫描只提供候选密码；继续探测真实文件后才登记为已验证密码。
 
         if zip.is_namelist_current():
-            verified = zip.verified_password()
+            verified = zip.namelist_password()
             if self._namelist_password_needs_extract_confirmation(zip):
                 password_candidates = self._unzip_password_candidates(zip)
                 if verified in password_candidates:
@@ -721,7 +739,7 @@ class Unzipper():
         else:
             password_candidates = list(zip.pw_list)
 
-        first_file = '2.zip' if zip.covered else zip.file_list[0]
+        first_file = self._password_probe_member(zip)
         for password in password_candidates:
             args = [
                 zip.path,
@@ -758,6 +776,8 @@ class Unzipper():
                     )
                     continue
                 zip.pw_list = [password]
+                if zip.container_requires_password():
+                    zip.mark_extract_password_verified(password)
                 return password
             current = list(zip.volumes) if zip.volumes else [zip.path]
             new_volumes = try_expand_volumes(current, msg or '')
@@ -770,6 +790,21 @@ class Unzipper():
                     )
                 )
                 return self.password_collision(zip, output_path)
+
+    @staticmethod
+    def _password_probe_member(zip: Zip) -> str:
+        if zip.covered:
+            return '2.zip'
+        first_file = zip.file_list[0]
+        if not zip.is_format('zip') or len(zip.volumes or []) > 1:
+            return first_file
+        selected = file_ops.zip_smallest_probe_member(zip.path, zip.file_list)
+        if selected and selected != first_file:
+            zip.file_list = [selected] + [
+                name for name in zip.file_list if name != selected
+            ]
+            return selected
+        return first_file
 
     @staticmethod
     def _namelist_password_needs_extract_confirmation(zip: Zip) -> bool:
@@ -847,8 +882,8 @@ class Unzipper():
         from volume.probe import try_expand_volumes
 
         if zip.container_requires_password():
-            if known_password and zip.is_namelist_current() and zip.verified_password():
-                verified = zip.verified_password()
+            if known_password and zip.is_namelist_current() and zip.namelist_password():
+                verified = zip.namelist_password()
                 password_candidates = [verified] + [
                     pw for pw in self._ordered_password_candidates(zip) if pw != verified
                 ]
@@ -858,14 +893,24 @@ class Unzipper():
             else:
                 password_candidates = self._ordered_password_candidates(zip)
                 verified_pw = zip.verified_password()
+                if not verified_pw:
+                    verified_pw = zip.namelist_password()
                 if verified_pw and verified_pw in password_candidates:
                     password_candidates = [verified_pw] + [
                         pw for pw in password_candidates if pw != verified_pw
                     ]
 
+            if password_candidates:
+                self.logger.info(
+                    " 密码候选已匹配，开始完整解压校验 [' {} ']".format(zip.path),
+                )
+
             for _expand_retry in range(3):
                 retry_outer = False
-                verified = zip.is_namelist_current()
+                verified = (
+                    zip.is_namelist_current()
+                    and not self._namelist_password_needs_extract_confirmation(zip)
+                )
                 for password in password_candidates:
                     returncode, msg = self._run_single_unzip(zip, output_path, password)
                     if returncode == 0:
@@ -876,6 +921,7 @@ class Unzipper():
                             continue
                         zip.pw_list = [password]
                         zip.mark_namelist_scanned(password)
+                        zip.mark_extract_password_verified(password)
                         self._emit_unzip_progress(1, 1)
                         self.logger.info(f'[{zip.path}]解压完成')
                         return True
@@ -885,13 +931,14 @@ class Unzipper():
                         ):
                             zip.pw_list = [password]
                             zip.mark_namelist_scanned(password)
+                            zip.mark_extract_password_verified(password)
                             self._emit_unzip_progress(1, 1)
                             self.logger.info(
                                 '[{}] 外层解压完成（内层加密项待单独处理）'.format(zip.path),
                             )
                             return True
                         self.logger.debug(
-                            '密码错误，已跳过：{} [{}]'.format(
+                            '候选密码解压校验失败，继续尝试：{} [{}]'.format(
                                 os.path.normpath(zip.path), password,
                             )
                         )
@@ -921,7 +968,7 @@ class Unzipper():
             known_password = False
 
         if known_password:
-            password_candidates = [zip.verified_password()]
+            password_candidates = [zip.namelist_password()]
         else:
             password_candidates = self._unzip_password_candidates(zip)
 

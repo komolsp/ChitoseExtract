@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -7,12 +8,42 @@ from seven_z_driver import (
     GetNamelistError,
     NoFile2ProcessError,
     SevenZDriver,
+    _decode_7z_text,
     _LARGE_SINGLE_FILE_MIN_BYTES,
     _method_is_store_encrypted,
 )
 
 
 class SevenZProbeTests(unittest.TestCase):
+    def test_decode_7z_text_prefers_utf8_for_unicode_filenames(self):
+        text = '【音声】中文标题・日本語ファイル.mp3'
+
+        self.assertEqual(_decode_7z_text(text.encode('utf-8')), text)
+
+    def test_decode_7z_text_keeps_gbk_fallback(self):
+        text = '错误：无法打开压缩包'
+
+        self.assertEqual(_decode_7z_text(text.encode('gbk')), text)
+
+    def test_real_7z_namelist_keeps_unicode_filename(self):
+        driver = SevenZDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            file_name = '中文日本語音声.txt'
+            source = os.path.join(tmp, file_name)
+            archive = os.path.join(tmp, 'unicode.7z')
+            with open(source, 'wb') as fh:
+                fh.write(b'unicode filename')
+            subprocess.run(
+                [driver.location_path, 'a', '-y', archive, file_name],
+                cwd=tmp,
+                check=True,
+                capture_output=True,
+            )
+
+            names, _info = driver.get_namelist(archive)
+
+            self.assertIn(file_name, names)
+
     def test_unzip_rejects_stdout_no_files_with_zero_exit_code(self):
         with mock.patch('seven_z_driver.os.path.isfile', return_value=True):
             driver = SevenZDriver(location_path=r'C:\fake\7z.exe')
@@ -29,6 +60,7 @@ class SevenZProbeTests(unittest.TestCase):
                     output_file='missing.txt',
                     format_type='zip',
                 )
+            self.assertIn('-sccUTF-8', popen.call_args.args[0])
 
     def test_method_is_store_encrypted(self):
         self.assertTrue(_method_is_store_encrypted('Copy 7zAES'))

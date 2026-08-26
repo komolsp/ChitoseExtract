@@ -7,7 +7,6 @@ from typing import Union
 
 import requests
 from requests.exceptions import RequestException
-from pyquery import PyQuery as pq
 
 from scraper.dlsite import Dlsite
 from scraper.locale import Locale
@@ -51,18 +50,6 @@ class Scraper(object):
     @property
     def locale(self) -> Locale:
         return self.__locale
-
-    def __request_work_page(self, rjcode: str):
-        url = Dlsite.compile_work_page_url(rjcode)
-        params = {'locale': self.__locale.name}
-        response = requests.get(url,
-                                params,
-                                timeout=(self.__connect_timeout, self.__read_timeout),
-                                proxies=self.__proxies)
-        response.raise_for_status()  # 如果返回了不成功的状态码，Response.raise_for_status() 会抛出一个 HTTPError 异常
-        html = response.text
-        time.sleep(self.__sleep_interval)
-        return html
 
     def __request_product_api(self, rjcode: str):
         url = Dlsite.compile_product_api_url(rjcode)
@@ -166,15 +153,6 @@ class Scraper(object):
 
         return metadata
     
-    # 获取封面图片链接
-    @staticmethod
-    def __parse_icon(html: str):
-        d = pq(html)
-        # parse icon
-        work_icon_url_ = str(d('#work_left > div > div > div.product-slider-data > div:nth-child(1)').attr('data-src'))
-        work_icon_url = "https:" + work_icon_url_
-        return work_icon_url
-
     def urlretrieve(self, url: str,
                     filename: Union[os.PathLike, str]) -> tuple[str, dict[str, str]]:
         """"

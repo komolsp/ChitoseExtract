@@ -7,12 +7,10 @@ import sys
 MIN_VERSION = (3, 9)
 REQUIRED_MODULES = (
     "chardet",
-    "lxml",
     "mutagen",
     "peewee",
     "PIL",
     "pydantic",
-    "pyquery",
     "pyzipper",
     "requests",
     "ruamel.yaml",

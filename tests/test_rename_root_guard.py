@@ -79,6 +79,29 @@ class TestRenameRootGuard(unittest.TestCase):
         self.assertEqual(result, destination)
         move_to_library.assert_called_once_with(work)
 
+    def test_rj_prefix_rename_remaps_all_timeline_paths(self):
+        work = os.path.normpath(r'E:\作品_pk')
+        timeline = Timeline(Archive(work), 'create_timeline', Archive(work))
+        expected = os.path.join(os.path.dirname(work), '[RJ01638016]作品_pk')
+
+        with mock.patch('file_ops.is_dir_path', return_value=True), mock.patch(
+            'file_ops.path_exists', return_value=False,
+        ), mock.patch(
+            'file_ops.safe_rename_path', return_value=True,
+        ), mock.patch.object(
+            task_runner, '_locate_relocated_work_root', return_value=None,
+        ), mock.patch.object(
+            task_runner, '_is_container_or_library_root', return_value=False,
+        ), mock.patch.object(
+            task_runner, '_find_rj_for_timeline', return_value='RJ01638016',
+        ), mock.patch.object(
+            task_runner, 'logger', mock.MagicMock(),
+        ), mock.patch.object(task_runner, '_remap_work_root') as remap:
+            result = task_runner._ensure_rj_prefix_in_place(work, timeline)
+
+        self.assertEqual(result, expected)
+        remap.assert_called_once_with(work, expected)
+
     def test_narrow_from_download_to_child(self):
         download = r'D:\下载'
         work = r'D:\下载\RJ01620216'

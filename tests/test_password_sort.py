@@ -1,13 +1,63 @@
+import os
+import tempfile
 import unittest
 from datetime import datetime
 from unittest import mock
 
 import task_runner
-from password import Password, sort_passwords
+from password import (
+    Password,
+    prioritize_latest_hits,
+    read_password,
+    sort_passwords,
+    write_password,
+)
 from zip import Zip
 
 
 class PasswordSortTests(unittest.TestCase):
+    def test_password_file_round_trip_preserves_metadata(self):
+        items = [
+            Password('密碼', '2026-08-01', 3, '2026-08-20'),
+            Password('plain', '2026-08-02', 0, ''),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'password.txt')
+
+            write_password(items, path)
+            loaded = read_password(path)
+
+            self.assertEqual(
+                [
+                    (item.password, item.add_date, item.hit_count, item.last_hit_date)
+                    for item in loaded
+                ],
+                [
+                    ('密碼', '2026-08-01', 3, '2026-08-20'),
+                    ('plain', '2026-08-02', 0, ''),
+                ],
+            )
+            self.assertFalse(os.path.exists(path + '.tmp'))
+
+    def test_read_password_tolerates_missing_and_dirty_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'password.txt')
+            self.assertEqual(read_password(path), [])
+
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write('\n')
+                fh.write('\t2026-08-01\t3\t2026-08-20\n')
+                fh.write('valid\t2026-08-01\tnot-a-number\t2026-08-20\n')
+                fh.write('minimal\n')
+
+            loaded = read_password(path)
+
+            self.assertEqual([item.password for item in loaded], ['valid', 'minimal'])
+            self.assertEqual(loaded[0].hit_count, 0)
+            self.assertEqual(loaded[0].last_hit_date, '2026-08-20')
+            self.assertEqual(loaded[1].add_date, str(datetime.now().date()))
+            self.assertEqual(loaded[1].last_hit_date, '')
+
     def test_default_password_date_is_evaluated_for_each_instance(self):
         with mock.patch('password.datetime.datetime') as mocked_datetime:
             mocked_datetime.now.side_effect = [
@@ -52,6 +102,25 @@ class PasswordSortTests(unittest.TestCase):
 
         self.assertEqual([item.password for item in result], ['valid', 'invalid'])
 
+    def test_latest_hits_use_fast_lane_without_dropping_candidates(self):
+        newer = Password('newer', '2026-08-20', 0, '')
+        latest_low = Password('latest-low', '2026-08-01', 2, '2026-08-22')
+        latest_high = Password('latest-high', '2026-07-01', 5, '2026-08-22')
+        previous = Password('previous', '2026-08-21', 100, '2026-08-21')
+
+        result = prioritize_latest_hits([
+            newer, latest_low, latest_high, previous,
+        ])
+
+        self.assertEqual(
+            [item.password for item in result],
+            ['latest-high', 'latest-low', 'previous', 'newer'],
+        )
+        self.assertCountEqual(
+            [item.password for item in result],
+            ['newer', 'latest-low', 'latest-high', 'previous'],
+        )
+
     def test_prepare_zip_reorders_existing_library_candidates(self):
         older = Password('older', '2026-08-03', 100, '2026-08-04')
         newer = Password('newer', '2026-08-04', 0, '')
@@ -60,7 +129,7 @@ class PasswordSortTests(unittest.TestCase):
         with mock.patch.object(task_runner, 'passwords', [older, newer]):
             task_runner._prepare_zip_for_unzip(archive)
 
-        self.assertEqual(archive.pw_list[:2], ['newer', 'older'])
+        self.assertEqual(archive.pw_list[:3], ['archive', 'older', 'newer'])
 
     def test_prepare_zip_keeps_task_note_ahead_of_library(self):
         older = Password('older', '2026-08-03', 100, '2026-08-04')
@@ -71,7 +140,43 @@ class PasswordSortTests(unittest.TestCase):
         with mock.patch.object(task_runner, 'passwords', [older, newer]):
             task_runner._prepare_zip_for_unzip(archive)
 
-        self.assertEqual(archive.pw_list[:3], ['one-off', 'newer', 'older'])
+        self.assertEqual(
+            archive.pw_list[:4], ['one-off', 'archive', 'older', 'newer'],
+        )
+
+    def test_prepare_zip_reuses_current_scan_after_library_reorder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.7z')
+            with open(path, 'wb') as fh:
+                fh.write(b'7z\xbc\xaf\x27\x1c' + b'\x00' * 16)
+            archive = Zip(path, ['secret'])
+            archive.file_list = ['inner.zip']
+            archive.compression_ratio_info = {'encrypted': True}
+            archive.mark_namelist_scanned('secret')
+            latest = Password('latest', '2026-08-01', 2, '2026-08-22')
+
+            with mock.patch.object(task_runner, 'passwords', [latest]), mock.patch.object(
+                task_runner, 'logger', mock.MagicMock(),
+            ):
+                task_runner._prepare_zip_for_unzip(archive)
+
+            self.assertTrue(archive.is_namelist_current())
+            self.assertEqual(archive.namelist_password(), 'secret')
+            self.assertFalse(archive.is_extract_password_verified())
+
+    def test_restore_without_volume_rename_keeps_current_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'archive.7z')
+            with open(path, 'wb') as fh:
+                fh.write(b'7z\xbc\xaf\x27\x1c' + b'\x00' * 16)
+            archive = Zip(path, ['secret'])
+            archive.file_list = ['inner.zip']
+            archive.compression_ratio_info = {'encrypted': True}
+            archive.mark_namelist_scanned('secret')
+
+            task_runner._restore_volume_original_names(archive)
+
+            self.assertTrue(archive.is_namelist_current())
 
 
 if __name__ == '__main__':

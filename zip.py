@@ -1,10 +1,7 @@
 import os
 
-import pk_logger
 from archive_recognition import ArchiveRecognition
 from timeline import Archive
-
-# logger = pk_logger.Pk_logger('unzip_logger', 'log.txt').add_log_handler().get_logger()
 
 
 class Zip(Archive):
@@ -30,17 +27,22 @@ class Zip(Archive):
         self.namelist_scanned = False
         self.scan_fingerprint = None
         self.scan_password = None
+        self.extract_password_verified = False
+        self.extract_verified_password = None
+        self.extract_verification_fingerprint = None
+        self.password_probe_info = {}
         self.manual_password_only = False
 
     def _scan_fingerprint(self):
         paths = tuple(sorted(self.volumes or [self.path]))
-        mtimes: list[float] = []
+        stats: list[tuple[int, int]] = []
         for path in paths:
             try:
-                mtimes.append(os.path.getmtime(path))
+                stat = os.stat(path)
+                stats.append((stat.st_mtime_ns, stat.st_size))
             except OSError:
-                mtimes.append(0.0)
-        return (paths, tuple(mtimes))
+                stats.append((0, 0))
+        return (paths, tuple(stats))
 
     def mark_namelist_scanned(self, password=None):
         self.namelist_scanned = True
@@ -52,6 +54,29 @@ class Zip(Archive):
         self.namelist_scanned = False
         self.scan_fingerprint = None
         self.scan_password = None
+        self.password_probe_info = {}
+
+    def namelist_password(self):
+        """返回取得当前目录列表时使用的密码候选，不代表已通过解压验证。"""
+        if not self.is_namelist_current():
+            return ''
+        return self.scan_password if self.scan_password is not None else ''
+
+    def mark_extract_password_verified(self, password):
+        self.extract_password_verified = True
+        self.extract_verified_password = '' if password is None else password
+        self.extract_verification_fingerprint = self._scan_fingerprint()
+
+    def invalidate_extract_password_verification(self):
+        self.extract_password_verified = False
+        self.extract_verified_password = None
+        self.extract_verification_fingerprint = None
+
+    def is_extract_password_verified(self) -> bool:
+        return bool(
+            self.extract_password_verified
+            and self.extract_verification_fingerprint == self._scan_fingerprint()
+        )
 
     def is_encrypted(self) -> bool:
         if self.compression_ratio_info.get('encrypted'):
@@ -159,9 +184,10 @@ class Zip(Archive):
         return True
 
     def verified_password(self):
-        if self.scan_password is not None:
-            return self.scan_password
-        return self.pw_list[0] if self.pw_list else ''
+        """仅返回已通过真实文件探测或正式解压验证的密码。"""
+        if not self.is_extract_password_verified():
+            return ''
+        return self.extract_verified_password
 
     def set_password(self, password_list):
         self.pw_list = [pw for pw in password_list if pw]

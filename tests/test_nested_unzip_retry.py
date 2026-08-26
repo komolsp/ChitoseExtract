@@ -180,6 +180,70 @@ class NestedUnzipRetryTests(unittest.TestCase):
             )
             self.assertFalse(os.path.exists(dedicated))
 
+    def test_cleanup_keeps_work_root_registered_when_directory_remains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            top_zip = os.path.join(tmp, 'pack.zip')
+            with open(top_zip, 'wb') as fh:
+                fh.write(b'pk')
+            dedicated = os.path.join(tmp, 'pack')
+            os.makedirs(dedicated)
+            zip_obj = Zip(top_zip, [], False)
+
+            with mock.patch.object(
+                task_runner.shutil, 'rmtree', return_value=None,
+            ), mock.patch.object(
+                task_runner, '_unregister_work_root',
+            ) as unregister:
+                task_runner._cleanup_failed_unzip_output(
+                    dedicated,
+                    zip_obj,
+                    existed_before=False,
+                    timeline=None,
+                )
+
+            unregister.assert_not_called()
+            self.assertTrue(os.path.isdir(dedicated))
+            self.assertTrue(task_runner.logger.warning.called)
+
+    def test_cleanup_keeps_work_root_registered_when_removal_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            top_zip = os.path.join(tmp, 'pack.zip')
+            with open(top_zip, 'wb') as fh:
+                fh.write(b'pk')
+            dedicated = os.path.join(tmp, 'pack')
+            os.makedirs(dedicated)
+            zip_obj = Zip(top_zip, [], False)
+
+            with mock.patch.object(
+                task_runner.shutil, 'rmtree', side_effect=PermissionError('locked'),
+            ), mock.patch.object(
+                task_runner, '_unregister_work_root',
+            ) as unregister:
+                task_runner._cleanup_failed_unzip_output(
+                    dedicated,
+                    zip_obj,
+                    existed_before=False,
+                    timeline=None,
+                )
+
+            unregister.assert_not_called()
+            self.assertTrue(os.path.isdir(dedicated))
+            self.assertTrue(task_runner.logger.warning.called)
+
+    def test_cleanup_removes_file_and_unregisters_work_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            partial = os.path.join(tmp, 'partial.bin')
+            with open(partial, 'wb') as fh:
+                fh.write(b'partial')
+
+            with mock.patch.object(
+                task_runner, '_unregister_work_root',
+            ) as unregister:
+                task_runner._cleanup_failed_unzip_output(partial)
+
+            self.assertFalse(os.path.exists(partial))
+            unregister.assert_called_once_with(os.path.normpath(partial))
+
     def test_nested_inner_failure_preserves_dedicated_subfolder(self):
         """套娃内层失败时，不得删除非暂存的专属子目录（可能含外层内容）。"""
         with tempfile.TemporaryDirectory() as tmp:

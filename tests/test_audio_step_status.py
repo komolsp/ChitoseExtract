@@ -120,6 +120,135 @@ class AudioStepStatusTests(unittest.TestCase):
 
         self.assertEqual(timeline.get_current_record().ops, 'tag_audio_failed')
 
+    def test_audio_loops_skip_work_without_rj(self):
+        cases = (
+            ('convert_audio_loop', 'convert_audio', '转flac', 'convert_audio_skip'),
+            ('tag_audio_loop', 'tag_audio', '写入元数据', 'tag_audio_skip'),
+        )
+        with tempfile.TemporaryDirectory() as root:
+            for loop_name, action_name, action_label, skip_op in cases:
+                with self.subTest(loop=loop_name):
+                    timeline = Timeline(Archive(root), 'rename', Archive(root))
+                    task_runner.timelines[:] = [timeline]
+                    task_runner.logger.reset_mock()
+
+                    with mock.patch.object(
+                        task_runner, '_start_audio_disk_monitor', return_value=None,
+                    ), mock.patch.object(
+                        task_runner, '_stop_disk_monitor',
+                    ), mock.patch.object(
+                        task_runner, '_rename_root_path', return_value=root,
+                    ), mock.patch.object(
+                        task_runner, '_resolve_rj_for_timeline_root', return_value=None,
+                    ), mock.patch.object(
+                        task_runner, action_name,
+                    ) as action:
+                        getattr(task_runner, loop_name)()
+
+                    action.assert_not_called()
+                    self.assertTrue(any(
+                        action_label in call.args[0]
+                        for call in task_runner.logger.info.call_args_list
+                    ))
+                    self.assertEqual(timeline.get_current_record().ops, skip_op)
+                    self.assertTrue(task_runner._timeline_step_succeeded(
+                        timeline, action_name,
+                    ))
+                    task_runner.prune_after_step(action_name)
+                    self.assertEqual(task_runner.timelines, [])
+
+    def test_audio_loops_log_skip_for_resource_library_work(self):
+        cases = (
+            ('convert_audio_loop', 'convert_audio', '转flac', 'convert_audio_skip'),
+            ('tag_audio_loop', 'tag_audio', '写入元数据', 'tag_audio_skip'),
+        )
+        with tempfile.TemporaryDirectory() as root:
+            for loop_name, action_name, action_label, skip_op in cases:
+                with self.subTest(loop=loop_name):
+                    timeline = Timeline(Archive(root), 'archive', Archive(root))
+                    task_runner.timelines[:] = [timeline]
+                    task_runner.logger.reset_mock()
+
+                    with mock.patch.object(
+                        task_runner, '_start_audio_disk_monitor', return_value=None,
+                    ), mock.patch.object(
+                        task_runner, '_stop_disk_monitor',
+                    ), mock.patch.object(
+                        task_runner, '_is_in_resource_library', return_value=True,
+                    ), mock.patch.object(
+                        task_runner, action_name,
+                    ) as action:
+                        getattr(task_runner, loop_name)()
+
+                    action.assert_not_called()
+                    self.assertTrue(any(
+                        action_label in call.args[0]
+                        for call in task_runner.logger.info.call_args_list
+                    ))
+                    self.assertEqual(timeline.get_current_record().ops, skip_op)
+                    self.assertTrue(task_runner._timeline_step_succeeded(
+                        timeline, action_name,
+                    ))
+
+    def test_audio_path_collection_does_not_change_timeline_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            timeline = Timeline(Archive(root), 'rename', Archive(root))
+            task_runner.timelines[:] = [timeline]
+
+            with mock.patch.object(
+                task_runner, '_rename_root_path', return_value=root,
+            ), mock.patch.object(
+                task_runner, '_resolve_rj_for_timeline_root', return_value=None,
+            ), mock.patch.object(
+                task_runner, '_is_in_resource_library', return_value=False,
+            ):
+                task_runner._audio_io_paths()
+
+            self.assertEqual(timeline.get_current_record().ops, 'rename')
+
+    def test_audio_loop_preserves_failure_from_another_step(self):
+        with tempfile.TemporaryDirectory() as root:
+            timeline = Timeline(
+                Archive(root), 'tag_audio_failed', Archive(root),
+            )
+            task_runner.timelines[:] = [timeline]
+
+            with mock.patch.object(
+                task_runner, '_start_audio_disk_monitor', return_value=None,
+            ), mock.patch.object(
+                task_runner, '_stop_disk_monitor',
+            ), mock.patch.object(
+                task_runner, 'convert_audio',
+            ) as convert:
+                task_runner.convert_audio_loop()
+
+            convert.assert_not_called()
+            self.assertEqual(
+                timeline.get_current_record().ops, 'tag_audio_failed',
+            )
+
+    def test_audio_loop_processes_shared_work_root_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = Timeline(Archive(root), 'rename', Archive(root))
+            shadow = Timeline(Archive(root), 'unnest', Archive(root))
+            task_runner.timelines[:] = [first, shadow]
+
+            with mock.patch.object(
+                task_runner, '_start_audio_disk_monitor', return_value=None,
+            ), mock.patch.object(
+                task_runner, '_stop_disk_monitor',
+            ), mock.patch.object(
+                task_runner, '_rename_root_path', return_value=root,
+            ), mock.patch.object(
+                task_runner, '_resolve_rj_for_timeline_root',
+                return_value='RJ123456',
+            ), mock.patch.object(
+                task_runner, 'convert_audio', return_value=root,
+            ) as convert:
+                task_runner.convert_audio_loop()
+
+            convert.assert_called_once_with(first)
+
     def test_audio_loops_retry_their_own_failure_state(self):
         cases = (
             ('convert_audio_failed', 'convert_audio', 'convert_audio_loop', 'convert_audio'),

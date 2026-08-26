@@ -33,10 +33,10 @@ def test_password(compress_file: str, password: str) -> tuple[bool, str]:
         return False, 'empty password'
     try:
         with pyzipper.AESZipFile(compress_file, 'r') as zf:
-            names = zf.namelist()
-            if not names:
+            entries = [info for info in zf.infolist() if not info.is_dir()]
+            if not entries:
                 return False, 'empty archive'
-            with zf.open(names[0], pwd=_password_bytes(password)) as fh:
+            with zf.open(entries[0], pwd=_password_bytes(password)) as fh:
                 fh.read(4)
     except RuntimeError as err:
         return False, str(err)

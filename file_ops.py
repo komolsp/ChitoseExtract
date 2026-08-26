@@ -3,7 +3,6 @@ import os
 import re
 import shutil
 import stat
-import struct
 import sys
 import zlib
 from dataclasses import dataclass
@@ -15,7 +14,7 @@ import pk_logger
 from volume import collect as volume_collect
 from volume import parse as volume_parse
 from volume import resolve_volume_archives
-from volume.resolver import VolumeResolver, clear_index_cache
+from volume.resolver import VolumeResolver
 
 logger = pk_logger.Pk_logger('file_ops_logger', 'log.txt').add_log_handler().get_logger()
 
@@ -781,6 +780,47 @@ def zip_has_encrypted_entries(file_path: str) -> bool:
             return any(info.flag_bits & 0x1 for info in zf.infolist())
     except (OSError, zipfile.BadZipFile, RuntimeError, KeyError):
         return False
+
+
+def zip_smallest_probe_member(file_path: str, candidates: list[str]) -> str | None:
+    """从 ZIP 目录中选最小的加密成员；无加密成员时选最小普通成员。"""
+    if not candidates:
+        return None
+    try:
+        import zipfile
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            entries = [
+                (info.filename.replace('\\', '/'), info)
+                for info in zf.infolist()
+                if not info.is_dir()
+            ]
+    except (OSError, zipfile.BadZipFile, RuntimeError, KeyError):
+        return None
+
+    matched = []
+    for index, candidate in enumerate(candidates):
+        normalized = candidate.replace('\\', '/')
+        infos = [info for name, info in entries if name == normalized]
+        if not infos and '?' in normalized:
+            # get_namelist 会把空格、下划线等字符替换为 7-Zip 的单字符
+            # 通配符；按相同语义匹配 ZIP 中的原始成员名。
+            pattern = re.compile(
+                '^' + re.escape(normalized).replace(r'\?', '[^/]') + '$',
+            )
+            infos = [info for name, info in entries if pattern.match(name)]
+        if infos:
+            matched.append((candidate, infos, index))
+    if not matched:
+        return None
+    encrypted = [
+        item for item in matched
+        if any(info.flag_bits & 0x1 for info in item[1])
+    ]
+    pool = encrypted or matched
+    return min(
+        pool,
+        key=lambda item: (sum(info.file_size for info in item[1]), item[2]),
+    )[0]
 
 
 def zip_uses_wz_aes(file_path: str) -> bool:

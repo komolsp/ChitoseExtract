@@ -12,6 +12,7 @@ from archive_recognition import ArchiveRecognition, ExtractBackend
 _PROBE_INVALID_PASSWORD = '__pk_invalid_probe_password__'
 # 单个大文件：未压缩大小下限（50 MiB）
 _LARGE_SINGLE_FILE_MIN_BYTES = 50 * 1024 * 1024
+_CONSOLE_CHARSET_FLAG = '-sccUTF-8'
 
 # Windows 下隐藏 7-Zip 子进程命令行窗口
 _SUBPROCESS_FLAGS = {}
@@ -22,7 +23,11 @@ if sys.platform == 'win32':
 def _decode_7z_text(data: bytes) -> str:
     if not data:
         return ''
-    return data.decode('gbk', errors='replace')
+    try:
+        return data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        # 兼容旧版 7-Zip 或未接受 -sccUTF-8 的本地化输出。
+        return data.decode('gbk', errors='replace')
 
 
 def _method_is_store_encrypted(method: str) -> bool:
@@ -47,6 +52,7 @@ class SevenZDriver:
 
     def _append_open_flags(self, cmd: list, jap: bool, covered: bool,
                            format_type: str | None, *, multithread: bool = False):
+        cmd.append(_CONSOLE_CHARSET_FLAG)
         if jap:
             cmd.append('-mcp=932')
         if covered:

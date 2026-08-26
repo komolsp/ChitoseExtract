@@ -1,8 +1,6 @@
 ruamel.yaml
 chardet
 requests
-lxml
-pyquery
 Pillow
 pywin32
 windnd

@@ -2,8 +2,6 @@
 ruamel.yaml==0.19.1
 chardet==7.4.3
 requests==2.34.2
-lxml==6.1.1
-pyquery==2.0.1
 Pillow==12.3.0
 pywin32==312
 windnd==1.0.7

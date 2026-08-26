@@ -28,7 +28,6 @@ from queue_scanner import (
     QueueScanDependencies,
     QueueScanner,
     filter_volume_sibling_unresolved as queue_filter_volume_sibling_unresolved,
-    volume_group_key as queue_volume_group_key,
     volume_task_identity as queue_volume_task_identity,
     zip_volume_identities as queue_zip_volume_identities,
 )
@@ -916,8 +915,8 @@ _STEP_SUCCESS_OPS = {
     'insert_rj': 'insert_rj',
     'filter': ('post_filter', 'post_filter_skip'),
     'rename': 'rename',
-    'convert_audio': 'convert_audio',
-    'tag_audio': 'tag_audio',
+    'convert_audio': ('convert_audio', 'convert_audio_skip'),
+    'tag_audio': ('tag_audio', 'tag_audio_skip'),
 }
 
 
@@ -1104,30 +1103,39 @@ def _merge_zip_passwords(zip_obj: Zip, extra_passwords: list):
 
 
 def _prepare_zip_for_unzip(zip_obj: Zip):
-    """解压前合并完整密码库；套娃内层/加密包强制重新验证密码。"""
+    """解压前合并完整密码库，并分别复用验证密码与目录候选。"""
     if not isinstance(zip_obj, Zip):
         return
     if zip_obj.requires_manual_password():
         return
-    library = password.get_str_passwords(password.sort_passwords(passwords))
+    was_current = zip_obj.is_namelist_current()
+    library = password.get_str_passwords(
+        password.prioritize_latest_hits(passwords),
+    )
     prior = list(zip_obj.pw_list)
-    verified = zip_obj.verified_password() if zip_obj.is_namelist_current() else ''
+    verified = zip_obj.verified_password()
+    namelist_candidate = zip_obj.namelist_password() if was_current else ''
     ordered: list[str] = []
-    # 任务备注/RJ 号与已验证密码是针对当前压缩包的明确候选，
-    # 依然优先；其余密码库项严格使用“添加日期、命中次数”顺序。
-    explicit = [verified, zip_obj.note, zip_obj.RJ_code]
+    # 明确候选与当前任务继承的密码优先；密码库仅把最近一次命中的
+    # 少量候选提到快速通道，后面仍保留原完整顺序。
+    explicit = [
+        verified, namelist_candidate, zip_obj.note, zip_obj.RJ_code, zip_obj.filename,
+    ]
     remaining = [pw for pw in prior if pw not in library]
-    for pw in explicit + library + remaining:
+    for pw in explicit + remaining + library:
         if pw and pw not in ordered:
             ordered.append(pw)
-    changed = ordered != zip_obj.pw_list
     zip_obj.pw_list = ordered
-    if (
-        changed
-        or zip_obj.is_encrypted()
-        or zip_obj.compression_ratio_info.get('encrypted')
-        or _is_nested_archive(zip_obj)
-    ):
+    if was_current:
+        if logger and zip_obj.namelist_password():
+            logger.info(
+                '复用上次识别到的密码候选："{}"'.format(
+                    os.path.normpath(zip_obj.path),
+                )
+            )
+    elif zip_obj.namelist_scanned:
+        # 指纹、文件列表或候选已失效时清除旧状态；仅密码库新增/重排
+        # 不再让未变化的压缩包重复扫描。
         zip_obj.invalidate_namelist_scan()
 
 
@@ -1345,10 +1353,6 @@ def unzip_loop():
                 _flatten_work_root(root)
     finally:
         _stop_disk_monitor(monitor)
-
-
-def _volume_group_key(volumes: list[str]) -> tuple[str, ...]:
-    return queue_volume_group_key(volumes)
 
 
 def _zip_volume_identities(zip_obj: Zip, source_path: str | None = None) -> set[tuple]:
@@ -2073,15 +2077,22 @@ def _cleanup_failed_unzip_output(
         return
     try:
         if os.path.isdir(norm):
-            shutil.rmtree(norm, ignore_errors=True)
+            shutil.rmtree(norm)
         else:
             os.remove(norm)
-        _unregister_work_root(norm)
-        if logger:
-            logger.info('已清理解压失败残留："{}"'.format(norm))
+    except FileNotFoundError:
+        pass
     except OSError as err:
         if logger:
             logger.warning('清理解压失败残留失败 [{}]: {}'.format(norm, err))
+        return
+    if os.path.exists(norm):
+        if logger:
+            logger.warning('清理解压失败残留失败，路径仍然存在：[{}]'.format(norm))
+        return
+    _unregister_work_root(norm)
+    if logger:
+        logger.info('已清理解压失败残留："{}"'.format(norm))
 
 
 def _restore_volume_original_names(zip_obj: Zip):
@@ -2090,14 +2101,18 @@ def _restore_volume_original_names(zip_obj: Zip):
     try:
         from volume.rename import restore_renamed_volumes
         father = zip_obj.father or os.path.dirname(os.path.abspath(zip_obj.path))
+        paths_changed = False
         if zip_obj.volumes and len(zip_obj.volumes) > 1:
-            restored = restore_renamed_volumes(list(zip_obj.volumes))
+            previous = list(zip_obj.volumes)
+            restored = restore_renamed_volumes(previous)
+            paths_changed = restored != previous
             zip_obj.volumes = restored
             zip_obj.path = restored[0]
         else:
             from volume.rename import restore_renames_in_directory
-            restore_renames_in_directory(father)
-        zip_obj.invalidate_namelist_scan()
+            paths_changed = bool(restore_renames_in_directory(father))
+        if paths_changed:
+            zip_obj.invalidate_namelist_scan()
     except Exception as err:
         if logger:
             logger.warning('还原分卷原名失败: {}'.format(err))
@@ -2408,6 +2423,7 @@ def _ensure_rj_prefix_in_place(work_path: str, timeline: Timeline) -> str | None
     if not file_ops.safe_rename_path(target_path, new_path):
         logger.error(f'插入 RJ 重命名失败: {target_path} -> {new_path}')
         return target_path
+    _remap_work_root(target_path, new_path)
     logger.info(' 从内容中发现 RJ 号 [{}]，重命名文件夹（原位置）'.format(rj))
     return new_path
 
@@ -2616,6 +2632,7 @@ def _relocate_work_to_library(timeline: Timeline):
     if not file_ops.safe_rename_path(target_path, new_path):
         logger.error(f'插入 RJ 重命名失败: {target_path} -> {new_path}')
         return None
+    _remap_work_root(target_path, new_path)
     logger.info(' 从内容中发现 RJ 号 [{}]，重命名文件夹'.format(rj))
     return _move_to_audio_library(new_path)
 
@@ -2880,7 +2897,6 @@ def rename_loop():
     global _last_rename_succeeded_roots
     seen_roots = set()
     succeeded_roots = set()
-    relocated_roots: list[tuple[str, str]] = []
     for timeline in timelines:
         current_ops = timeline.get_current_record().ops
         if _timeline_step_failed(timeline) and current_ops != 'rename_failed':
@@ -2956,19 +2972,17 @@ def rename_loop():
         if new_path is not None:
             succeeded_roots.add(root_key)
             new_root = os.path.normpath(new_path)
-            succeeded_roots.add(os.path.normcase(new_root))
-            relocated_roots.append((rename_root, new_root))
+            new_root_key = os.path.normcase(new_root)
+            succeeded_roots.add(new_root_key)
+            seen_roots.add(new_root_key)
+            # 立即同步影子时间线；延迟到循环结束会让下一条旧任务误报重命名失败。
+            _remap_work_root(rename_root, new_root)
         elif (
             timeline.get_current_record().ops not in ('rename_failed', 'rename_duplicate')
             and not _timeline_step_succeeded(timeline, 'rename')
         ):
             _append_step_record(timeline, 'rename_failed')
 
-    # dlrenamer 会直接移动作品目录；同步更新同作品的套娃影子时间线，
-    # 否则后续音频步骤只处理新路径，而影子任务仍停在已不存在的旧路径，
-    # 最终无法按作品根清理并被状态栏误报为“部分完成”。
-    for old_root, new_root in relocated_roots:
-        _remap_work_root(old_root, new_root)
     _last_rename_succeeded_roots = succeeded_roots
     progress_ui.add2lis(timelines)
     if hasattr(progress_ui, '_run_on_ui') and hasattr(progress_ui, '_refresh_run_status'):
@@ -3028,16 +3042,38 @@ def _resolve_rj_for_timeline_root(root: str, timeline: Timeline) -> str | None:
     return None
 
 
-def _iter_unique_audio_work_roots(retry_failed_op: str | None = None):
+def _iter_unique_audio_work_roots(
+        retry_failed_op: str | None = None, *, action_label: str = '音频处理',
+        skip_op: str | None = None):
     seen_roots: set[str] = set()
     for timeline in timelines:
         current_ops = timeline.get_current_record().ops
         if _timeline_step_failed(timeline) and current_ops != retry_failed_op:
             continue
         if _is_in_resource_library(timeline.get_current_path()):
+            if logger and skip_op:
+                logger.info(
+                    '未识别 RJ 号，已跳过{}："{}"'.format(
+                        action_label,
+                        os.path.normpath(timeline.get_current_path() or ''),
+                    )
+                )
+            if skip_op:
+                _append_step_record(timeline, skip_op)
             continue
         root = _rename_root_path(timeline.get_current_path())
         if not root or not file_ops.is_dir_path(root):
+            continue
+        if not _resolve_rj_for_timeline_root(root, timeline):
+            if logger and skip_op:
+                logger.info(
+                    '未识别 RJ 号，已跳过{}："{}"'.format(
+                        action_label,
+                        os.path.normpath(root),
+                    )
+                )
+            if skip_op:
+                _append_step_record(timeline, skip_op)
             continue
         root_key = os.path.normcase(os.path.normpath(root))
         if root_key in seen_roots:
@@ -3049,7 +3085,9 @@ def _iter_unique_audio_work_roots(retry_failed_op: str | None = None):
 def convert_audio_loop():
     monitor = _start_audio_disk_monitor()
     try:
-        for timeline, root in _iter_unique_audio_work_roots('convert_audio_failed'):
+        for timeline, root in _iter_unique_audio_work_roots(
+                'convert_audio_failed', action_label='转flac',
+                skip_op='convert_audio_skip'):
             try:
                 convert_audio(timeline)
             except Exception as err:
@@ -3133,7 +3171,9 @@ def convert_audio(timeline: Timeline):
 def tag_audio_loop():
     monitor = _start_audio_disk_monitor()
     try:
-        for timeline, root in _iter_unique_audio_work_roots('tag_audio_failed'):
+        for timeline, root in _iter_unique_audio_work_roots(
+                'tag_audio_failed', action_label='写入元数据',
+                skip_op='tag_audio_skip'):
             try:
                 tag_audio(timeline)
             except Exception as err:

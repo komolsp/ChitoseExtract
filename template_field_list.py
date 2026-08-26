@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import tkinter as tk
-from tkinter import ttk
 
 # 避免 template_field_list → gui → task_runner → ez_client 循环导入
 _COLORS = {

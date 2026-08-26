@@ -225,7 +225,9 @@ OPS_LABEL = {
     'rename': '已完成',
     'rename_duplicate': '库中有重复',
     'convert_audio': '已转换',
+    'convert_audio_skip': '已跳过转换',
     'tag_audio': '已写入元数据',
+    'tag_audio_skip': '已跳过写入元数据',
     'unzip_failed': '解压失败',
     'scan_failed': '未发现可解压文件',
     'archive_failed': '归档失败',
@@ -686,23 +688,10 @@ class Console(ttk.Frame):
                 self._unzip_gif.stop()
         self._run_on_ui(_do)
 
-    def _clear_task_tree(self):
-        for item in self.task_tree.get_children():
-            self.task_tree.delete(item)
-        self._task_tree_items.clear()
-        self._task_tree_rows.clear()
-
     @staticmethod
     def _task_row_tag(index: int, ops: str | None) -> str:
         failed = ops == 'rename_duplicate' or bool(ops and ops.endswith('_failed'))
         return 'failed' if failed else ('odd' if index % 2 else 'even')
-
-    def _insert_task_row(self, input_text, step_text, output_text, ops: str | None = None):
-        count = len(self.task_tree.get_children())
-        tag = self._task_row_tag(count, ops)
-        return self.task_tree.insert(
-            '', 'end', values=(input_text, step_text, output_text), tags=(tag,),
-        )
 
     def write(self, info):
         """线程安全地缓存日志，由 Tk 主线程定时批量写入。"""

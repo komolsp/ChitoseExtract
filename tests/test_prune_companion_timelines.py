@@ -105,6 +105,7 @@ class TestPruneCompanionTimelines(unittest.TestCase):
 
             rename_mock.assert_called_once_with(main)
             self.assertEqual(os.path.normpath(shadow.get_current_path()), new_root)
+            self.assertEqual(shadow.get_current_record().ops, 'unnest')
 
             current = main.get_current_record().output_file
             main.add_record(Record(current, 'tag_audio', Archive(new_root)))
