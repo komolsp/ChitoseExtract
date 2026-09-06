@@ -844,7 +844,6 @@ def _flatten_work_root(root: str) -> str:
     if os.path.normcase(os.path.normpath(new_root)) != os.path.normcase(os.path.normpath(root)):
         _remap_work_root(root, new_root)
         root = new_root
-    file_ops.cleanup_covered_extract_junk(new_root)
     return new_root
 
 
@@ -1156,7 +1155,8 @@ def _refresh_zip_volumes(zip_obj: Zip, source_path: str | None = None):
 
     anchor = None
     for candidate in (
-        source_path,
+        # 套娃时间线的首条输入仍是外层包，不能拿它刷新当前内层分卷。
+        None if _is_nested_archive(zip_obj) else source_path,
         zip_obj.path,
         *((zip_obj.volumes or [])[:1]),
         *((zip_obj.volumes or [])[1:]),
@@ -2174,8 +2174,6 @@ def unzip(timeline: Timeline):
         if zip.del_after_unzip and not source_removed:
             for volume in (zip.volumes or [zip.path]):
                 delete_file(volume)
-        if zip.covered:
-            file_ops.cleanup_covered_extract_junk(output_path)
         return output_path
     finally:
         if not succeeded:
@@ -3379,7 +3377,6 @@ def _discard_wrapper_dir(dir_path: str):
 def reload():
     new_conf = config.Config()
     file_ops.set_discard_dir_path_hook(_discard_wrapper_dir)
-    file_ops.set_delete_path_hook(delete_file)
     new_passwords = password.read_password()
     new_filter = filter_module.Filter(
         new_conf.filter_kw, new_conf.filter_dir, logger,

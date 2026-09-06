@@ -20,8 +20,6 @@ logger = pk_logger.Pk_logger('file_ops_logger', 'log.txt').add_log_handler().get
 
 # 套娃文件夹拍平后，空外壳的处置回调（由 task_runner 注入，移入内置回收站）。
 _discard_dir_path_hook = None
-# 误判解压垃圾文件的处置回调（由 task_runner 注入，逻辑删除进回收站）。
-_delete_path_hook = None
 
 # 7-Zip 可能识别的压缩包/载体扩展名（小写，含点）
 ARCHIVE_EXTENSIONS = frozenset({
@@ -1648,54 +1646,6 @@ def set_discard_dir_path_hook(handler):
     _discard_dir_path_hook = handler
 
 
-def set_delete_path_hook(handler):
-    """注册文件删除处置函数（误判解压垃圾等，逻辑删除进回收站）。"""
-    global _delete_path_hook
-    _delete_path_hook = handler
-
-
-def _delete_file_path(file_path: str):
-    if _delete_path_hook:
-        try:
-            _delete_path_hook(file_path)
-            return
-        except Exception as err:
-            logger.error('删除文件失败，尝试直接删除：[{}]: {}'.format(file_path, err))
-    clear_shell_folder_attributes(file_path)
-    try:
-        os.remove(file_path)
-    except OSError as err:
-        logger.warning('删除文件失败：[{}]: {}'.format(file_path, err))
-
-
-def _is_covered_extract_junk_file(file_path: str) -> bool:
-    """判断是否为隐写/套娃载体误解压产生的垃圾碎片文件。"""
-    if not is_file_path(file_path):
-        return False
-    name = os.path.basename(file_path.rstrip(' \\'))
-    return is_covered_extract_junk_basename(name)
-
-
-def cleanup_covered_extract_junk(root: str) -> int:
-    """移除误判解压残留的垃圾文件（如 1、2.zst），返回删除数量。"""
-    if not root or not is_dir_path(root):
-        return 0
-    removed = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            name for name in dirnames
-            if name.upper() not in _UNNEST_JUNK_DIR_NAMES
-        ]
-        for name in list(filenames):
-            path = join_dir(dirpath, name)
-            if not _is_covered_extract_junk_file(path):
-                continue
-            logger.info('移除误判解压垃圾文件：[{}]'.format(os.path.normpath(path)))
-            _delete_file_path(path)
-            removed += 1
-    return removed
-
-
 def _is_junk_metadata_dir(dir_path: str) -> bool:
     base = os.path.basename(dir_path.rstrip(' \\'))
     return base.upper() in _UNNEST_JUNK_DIR_NAMES
@@ -1834,7 +1784,6 @@ def flatten_wrapper_dirs(work_root: str) -> str:
     _purge_junk_metadata_dirs(current)
     current = collapse_top_wrapper(current)
     _purge_junk_metadata_dirs(current)
-    cleanup_covered_extract_junk(current)
     normalize_trailing_space_dirnames(current)
     return current
 

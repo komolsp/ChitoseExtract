@@ -7,6 +7,26 @@ from file_ops import flatten_wrapper_dirs
 
 
 class WrapperFlattenTest(unittest.TestCase):
+    def test_flatten_preserves_numeric_files_and_contents(self):
+        with tempfile.TemporaryDirectory() as root:
+            content_dir = os.path.join(root, 'wrapper', 'contents')
+            os.makedirs(os.path.join(content_dir, 'bonus'))
+            expected = {
+                '001': b'original numeric file',
+                '1234.zst': b'original zstd file',
+                os.path.join('bonus', '2'): b'nested numeric file',
+                os.path.join('bonus', '3.zst'): b'nested zstd file',
+            }
+            for relative, payload in expected.items():
+                with open(os.path.join(content_dir, relative), 'wb') as handle:
+                    handle.write(payload)
+
+            flatten_wrapper_dirs(root)
+
+            for relative, payload in expected.items():
+                with open(os.path.join(root, 'contents', relative), 'rb') as handle:
+                    self.assertEqual(handle.read(), payload)
+
     def _tmpdir(self) -> str:
         return tempfile.mkdtemp(prefix='wrapper_test_')
 

@@ -39,6 +39,42 @@ class NestedWorkRootGuardTests(unittest.TestCase):
         task_runner._work_root_preferred_names.clear()
         task_runner.timelines.clear()
 
+    def test_runner_flatten_preserves_numeric_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, '001')
+            with open(path, 'wb') as handle:
+                handle.write(b'original content')
+            self.assertEqual(task_runner._flatten_work_root(root), root)
+            with open(path, 'rb') as handle:
+                self.assertEqual(handle.read(), b'original content')
+
+    def test_covered_merge_preserves_existing_and_extracted_numeric_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            inner_path = os.path.join(root, 'inner.mp4')
+            with open(inner_path, 'wb') as handle:
+                handle.write(b'carrier')
+            existing = os.path.join(root, '001')
+            with open(existing, 'wb') as handle:
+                handle.write(b'existing content')
+            task_runner._register_work_root(root)
+            inner = Zip(inner_path, [], False, covered=True)
+            timeline = Timeline(Archive(inner_path), 'find_zip', inner)
+
+            def fake_unzip(_zip, output_path, *_args):
+                os.makedirs(output_path, exist_ok=True)
+                with open(os.path.join(output_path, '1234.zst'), 'wb') as handle:
+                    handle.write(b'extracted content')
+                return True
+
+            task_runner.unzipper.unzip.side_effect = fake_unzip
+            result = task_runner.unzip(timeline)
+
+            self.assertEqual(os.path.normcase(result), os.path.normcase(root))
+            for name, payload in [('001', b'existing content'),
+                                  ('1234.zst', b'extracted content')]:
+                with open(os.path.join(root, name), 'rb') as handle:
+                    self.assertEqual(handle.read(), payload)
+
     def test_nested_merge_keeps_existing_outer_work_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_root = os.path.join(tmp, 'RJ01624987_pk')

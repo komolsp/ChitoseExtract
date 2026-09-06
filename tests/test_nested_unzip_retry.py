@@ -22,6 +22,42 @@ class NestedUnzipRetryTests(unittest.TestCase):
         task_runner.logger = mock.MagicMock()
         task_runner.passwords = []
 
+    def test_refresh_nested_archive_does_not_select_outer_volumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = os.path.join(tmp, '1080P.7z.001')
+            work_root = os.path.join(tmp, '1080P.7z')
+            os.makedirs(work_root)
+            inner = os.path.join(work_root, '1080P.mp4')
+            for path in (outer, inner):
+                with open(path, 'wb') as fh:
+                    fh.write(b'archive')
+            task_runner._register_work_root(work_root)
+            zip_obj = Zip(inner, [], True)
+            with mock.patch.object(
+                task_runner.file_ops, 'resolve_volume_archives',
+                side_effect=lambda path: [path],
+            ) as resolve:
+                task_runner._refresh_zip_volumes(zip_obj, outer)
+            resolve.assert_called_once_with(inner)
+            self.assertEqual(zip_obj.path, inner)
+            self.assertIsNone(zip_obj.volumes)
+
+    def test_refresh_outer_archive_still_uses_original_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = os.path.join(tmp, '1080P.7z.001')
+            volumes = [original, os.path.join(tmp, '1080P.7z.002')]
+            for path in volumes:
+                with open(path, 'wb') as fh:
+                    fh.write(b'archive')
+            zip_obj = Zip(os.path.join(tmp, 'stale.7z.001'), [], False)
+            with mock.patch.object(
+                task_runner.file_ops, 'resolve_volume_archives',
+                return_value=volumes,
+            ) as resolve:
+                task_runner._refresh_zip_volumes(zip_obj, original)
+            resolve.assert_called_once_with(original)
+            self.assertEqual(zip_obj.path, original)
+
     def test_incremental_scan_roots_only_include_changed_top_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             stable_dir = os.path.join(tmp, 'stable')
