@@ -1,4 +1,6 @@
-from typing import NotRequired, TypedDict
+from typing import TypedDict
+
+from typing_extensions import NotRequired
 
 
 CV_LIST_SEPARATOR = ';'

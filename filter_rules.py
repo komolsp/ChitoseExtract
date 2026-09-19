@@ -219,6 +219,48 @@ def directory_name_patterns_for_rule(rule_id: str) -> tuple[str, ...]:
     return EXTENSION_ONLY_DIR_NAME_PATTERNS.get(rule_id, ())
 
 
+# 嵌套量词（(x+)+ / (x*)* / (x+){2,} 形态）在长字符串上会指数级回溯。
+# Python 的 re 没有匹配超时，唯一可行的防护是编译期拦截。
+# 检测刻意保守：只认「组内已有 [+*]，组外再套 [+*] 或 {n,}」这一形态，
+# 正常的 (abc)+、(a|b)+、(?:x)(?:y) 都不会命中。
+_NESTED_QUANTIFIER_RE = re.compile(r'\([^)]*[+*][^)]*\)\s*(?:[+*]|\{\d+,\d*\})')
+
+# 编译正则可能抛出的异常：除语法错误外，超大模式还会溢出或耗尽内存。
+_PATTERN_ERRORS = (re.error, RecursionError, MemoryError, OverflowError)
+
+# keyword 来自 config.yaml，可被手写成超长模式；上限取得足够宽松，
+# 远高于任何内置规则（最长约 400 字符），只用于挡住异常输入。
+MAX_FILTER_PATTERN_LENGTH = 10_000
+
+
+def looks_catastrophic(pattern: str) -> bool:
+    """粗判正则是否存在嵌套量词（灾难性回溯的典型来源）。"""
+    return bool(_NESTED_QUANTIFIER_RE.search(pattern))
+
+
+def compile_filter_pattern(pattern: str, logger, label: str = '过滤规则') -> re.Pattern | None:
+    """编译过滤正则；无效、过长或存在嵌套量词时跳过并告警，绝不中断调用方。"""
+    if len(pattern) > MAX_FILTER_PATTERN_LENGTH:
+        if logger:
+            logger.warning(
+                f'{label}正则过长（{len(pattern)} 字符，上限 '
+                f'{MAX_FILTER_PATTERN_LENGTH}），已跳过：[ {pattern[:120]}… ]'
+            )
+        return None
+    if looks_catastrophic(pattern):
+        if logger:
+            logger.warning(
+                f'{label}正则含嵌套量词，存在灾难性回溯风险，已跳过：[ {pattern} ]'
+            )
+        return None
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except _PATTERN_ERRORS as err:
+        if logger:
+            logger.warning(f'{label}正则无效，已跳过：[ {pattern} ] {err}')
+        return None
+
+
 def compile_directory_name_patterns(
     keyword_list: list,
     logger,
@@ -235,12 +277,11 @@ def compile_directory_name_patterns(
         for pattern in directory_name_patterns_for_rule(owner):
             if pattern in seen:
                 continue
-            try:
-                compiled.append((re.compile(pattern, re.IGNORECASE), f'{owner}:dir'))
-                seen.add(pattern)
-            except re.error as err:
-                if logger:
-                    logger.warning(f'文件夹名过滤正则无效，已跳过：[ {pattern} ] {err}')
+            compiled_pattern = compile_filter_pattern(pattern, logger, '文件夹名过滤')
+            if compiled_pattern is None:
+                continue
+            compiled.append((compiled_pattern, f'{owner}:dir'))
+            seen.add(pattern)
     return compiled
 
 

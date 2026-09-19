@@ -133,9 +133,12 @@ def collect_7z_readonly(
         path = os.path.join(dirname, file)
         if part.casefold() == '补':
             if os.path.exists(first_part_path):
-                path = first_part_path
-            else:
+                # 首卷 .001 已存在时 collect_7z 会跳过 .补；只读版本必须同样跳过，
+                # 否则同一个 .001 会被计入两次，把单卷误判成两卷的分卷组。
                 continue
+            # .001 缺失：collect_7z 会把 .补 改名为 .001 后计入，只读探测不改名，
+            # 但判定必须一致（否则含 .补 的分卷在只读路径下漏判）；路径保留真实
+            # 存在的 .补 本身，避免返回值指向不存在的文件。
         found.append((parse.order_7z_part(part), path))
 
     if len(found) < 2:

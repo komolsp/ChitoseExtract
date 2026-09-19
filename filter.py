@@ -6,7 +6,11 @@ import shutil
 
 import file_ops
 import task_runner
-from filter_rules import compile_directory_name_patterns, pattern_allows_directory_match
+from filter_rules import (
+    compile_directory_name_patterns,
+    compile_filter_pattern,
+    pattern_allows_directory_match,
+)
 
 # 无损主音源：有这些时才允许按规则删除 MP3（避免误删 MP3-only 作品）
 _LOSSLESS_PATTERN = re.compile(r'\.(?:WAV|FLAC|AIF|AIFF)\b', re.IGNORECASE)
@@ -23,15 +27,10 @@ def _compile_filter_patterns(keyword_list: list, logger) -> list[tuple[re.Patter
     for key in keyword_list:
         if not key:
             continue
-        try:
-            compiled.append((
-                re.compile(key, re.IGNORECASE),
-                key,
-                pattern_allows_directory_match(key),
-            ))
-        except re.error as err:
-            if logger:
-                logger.warning(f'过滤规则正则无效，已跳过：[ {key} ] {err}')
+        pattern = compile_filter_pattern(key, logger)
+        if pattern is None:
+            continue
+        compiled.append((pattern, key, pattern_allows_directory_match(key)))
     return compiled
 
 

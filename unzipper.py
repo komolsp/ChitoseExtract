@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import re
@@ -178,7 +178,9 @@ class Unzipper():
             return True
 
         compress = zip.path
-        is_volume = len(zip.volumes or []) > 1 or file_ops.is_volume_zip(compress)
+        # 探测阶段必须只读：非只读的分卷判定会触发 normalize 改名，
+        # 此处仅用于选择策略，不该在真正解压前改动磁盘上的分卷文件名。
+        is_volume = len(zip.volumes or []) > 1 or file_ops.is_volume_zip(compress, readonly=True)
         strategies = self._namelist_strategies(zip, is_volume)
         original_passwords = list(zip.pw_list)
 
@@ -444,7 +446,7 @@ class Unzipper():
         for _expand_retry in range(3):
             namelist = []
             compression_ratio_info = {}
-            is_volume = len(zip.volumes) > 1 or file_ops.is_volume_zip(zip.path)
+            is_volume = len(zip.volumes) > 1 or file_ops.is_volume_zip(zip.path, readonly=True)
             strategies = self._namelist_strategies(zip, is_volume)
             scan_volumes = zip.volumes[:1] if is_volume else zip.volumes
             expanded = False
@@ -1276,7 +1278,7 @@ class Unzipper():
         )
         # 路径是压缩文件，分卷只把头卷加入队列
         log = None
-        if file_ops.is_volume_zip(path):
+        if file_ops.is_volume_zip(path, readonly=True):
             volumes = file_ops.volume_zip_list(path)
             if not volumes:
                 self.logger.debug(

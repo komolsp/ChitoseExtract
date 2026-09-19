@@ -148,6 +148,60 @@ def _guess_mime(cover_bytes: bytes) -> str:
     return 'image/jpeg'
 
 
+# 标签写入结果：跳过（保留原标签）不等同于失败，调用方需区分以免误报步骤失败。
+TAG_WRITTEN = 'written'
+TAG_SKIPPED = 'skipped'
+TAG_FAILED = 'failed'
+
+
+def _coerce_config(config: TagConfig | dict) -> TagConfig:
+    if isinstance(config, TagConfig):
+        return config
+    return TagConfig(
+        extensions=tuple(config.get('extensions') or TagConfig.extensions),
+        embed_cover=bool(config.get('embed_cover', True)),
+        save_cover_jpg=bool(config.get('save_cover_jpg', True)),
+        force_retag=bool(config.get('force_retag', False)),
+        cv_max_count=int(config.get('cv_max_count', 4)),
+        max_workers=_clamp_workers(config.get('max_workers', 4)),
+    )
+
+
+def _flac_has_user_tags(audio) -> bool:
+    """FLAC 是否带用户标签或内嵌封面。
+
+    不能用 len(audio)：FLAC 的 __len__ 返回元数据块数量，而任何 FLAC 都至少
+    含一个 STREAMINFO 块，恒为真，会导致所有 FLAC 都被误判为「已有标签」。
+    只认 PICTURE 块与 VORBIS_COMMENT 中的条目。
+    """
+    if getattr(audio, 'pictures', None):
+        return True
+    tags = getattr(audio, 'tags', None)
+    if not tags:
+        return False
+    try:
+        return len(tags) > 0
+    except TypeError:
+        return True
+
+
+def _has_existing_tags(path: str, ext: str) -> bool:
+    """判断音频是否已带标签或内嵌封面（供 force_retag=False 时保留原样）。"""
+    try:
+        if ext == '.flac':
+            return _flac_has_user_tags(FLAC(path))
+        if ext == '.mp3':
+            audio = MP3(path, ID3=ID3)
+        elif ext in ('.wav', '.wave'):
+            audio = WAVE(path)
+        else:
+            return False
+    except Exception:
+        # 读不出来时不拦截：交给写入流程报错，避免把损坏文件当成「已有标签」跳过。
+        return False
+    return bool(getattr(audio, 'tags', None))
+
+
 def save_cover_jpg(folder: str, cover_bytes: bytes) -> None:
     if not cover_bytes:
         return
@@ -244,32 +298,30 @@ def _apply_wav_tags(path: str, values: dict[str, str], cover_bytes: bytes | None
     audio.save()
 
 
-def tag_file(
+def _tag_file_status(
         path: str,
         metadata: WorkMetadata,
         config: TagConfig | dict,
         *,
         cover_bytes: bytes | None = None,
         log: Callable[[str], None] | None = None,
-) -> bool:
-    if isinstance(config, dict):
-        cfg = TagConfig(
-            extensions=tuple(config.get('extensions') or TagConfig.extensions),
-            embed_cover=bool(config.get('embed_cover', True)),
-            save_cover_jpg=bool(config.get('save_cover_jpg', True)),
-            force_retag=bool(config.get('force_retag', False)),
-            cv_max_count=int(config.get('cv_max_count', 4)),
-            max_workers=_clamp_workers(config.get('max_workers', 4)),
-        )
-    else:
-        cfg = config
+) -> str:
+    """写入标签，返回 TAG_WRITTEN / TAG_SKIPPED / TAG_FAILED。"""
+    cfg = _coerce_config(config)
 
     if not os.path.isfile(path):
-        return False
+        return TAG_FAILED
     _, ext = os.path.splitext(path)
     ext = ext.lower()
     if ext not in {item.lower() for item in cfg.extensions}:
-        return False
+        return TAG_FAILED
+
+    # force_retag=False 时保留已有标签：原实现对 FLAC 直接 delete()、对
+    # MP3/WAV 直接 clear()，等于把用户已有的标签和封面原地清空且不可恢复。
+    if not cfg.force_retag and _has_existing_tags(path, ext):
+        if log:
+            log(f'已有标签，按 force_retag=false 保留原样："{os.path.normpath(path)}"')
+        return TAG_SKIPPED
 
     track_title = os.path.splitext(os.path.basename(path))[0]
     values = build_tag_values(metadata, track_title, cfg)
@@ -284,15 +336,32 @@ def tag_file(
             else:
                 _apply_mp3_tags(path, values, cover)
         else:
-            return False
+            return TAG_FAILED
     except Exception as err:
         if log:
             log(f'写入标签失败："{os.path.normpath(path)}"：{err}')
-        return False
+        return TAG_FAILED
 
     if log:
         log(f'已写入元数据："{os.path.normpath(path)}"')
-    return True
+    return TAG_WRITTEN
+
+
+def tag_file(
+        path: str,
+        metadata: WorkMetadata,
+        config: TagConfig | dict,
+        *,
+        cover_bytes: bytes | None = None,
+        log: Callable[[str], None] | None = None,
+) -> bool:
+    """单个文件写入标签；跳过（保留原标签）与失败都返回 False。
+
+    需要区分「跳过」与「失败」的调用方请用 _tag_file_status。
+    """
+    return _tag_file_status(
+        path, metadata, config, cover_bytes=cover_bytes, log=log,
+    ) == TAG_WRITTEN
 
 
 def tag_work_folder(
@@ -303,17 +372,7 @@ def tag_work_folder(
         cover_bytes: bytes | None = None,
         log: Callable[[str], None] | None = None,
 ) -> tuple[int, int]:
-    if isinstance(config, dict):
-        cfg = TagConfig(
-            extensions=tuple(config.get('extensions') or TagConfig.extensions),
-            embed_cover=bool(config.get('embed_cover', True)),
-            save_cover_jpg=bool(config.get('save_cover_jpg', True)),
-            force_retag=bool(config.get('force_retag', False)),
-            cv_max_count=int(config.get('cv_max_count', 4)),
-            max_workers=_clamp_workers(config.get('max_workers', 4)),
-        )
-    else:
-        cfg = config
+    cfg = _coerce_config(config)
 
     if cfg.save_cover_jpg and cover_bytes:
         for folder in find_audio_subdirs(root, cfg.extensions):
@@ -327,25 +386,40 @@ def tag_work_folder(
     log_lock = Lock()
     safe_log = _thread_safe_log(log, log_lock)
     ok = 0
+    skipped = 0
 
-    def _tag_one(path: str) -> bool:
-        return tag_file(path, metadata, cfg, cover_bytes=cover_bytes, log=safe_log)
+    def _tag_one(path: str) -> str:
+        return _tag_file_status(
+            path, metadata, cfg, cover_bytes=cover_bytes, log=safe_log,
+        )
+
+    def _tally(status: str) -> None:
+        # 保留原标签不算失败：force_retag=false 下这是预期行为，
+        # 若计入失败会让整个「写入元数据」步骤被判为失败并回滚任务状态。
+        nonlocal ok, skipped
+        if status == TAG_WRITTEN:
+            ok += 1
+        elif status == TAG_SKIPPED:
+            skipped += 1
 
     if workers <= 1:
         for path in files:
-            if _tag_one(path):
-                ok += 1
-        return ok, len(files)
+            _tally(_tag_one(path))
+    else:
+        if log:
+            log(f'并行写入元数据：{len(files)} 个文件，{workers} 线程')
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_tag_one, path) for path in files]
+            for future in as_completed(futures):
+                try:
+                    _tally(future.result())
+                except Exception as err:
+                    if safe_log:
+                        safe_log(f'写入元数据线程异常：{err}')
 
-    if log:
-        log(f'并行写入元数据：{len(files)} 个文件，{workers} 线程')
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_tag_one, path) for path in files]
-        for future in as_completed(futures):
-            try:
-                if future.result():
-                    ok += 1
-            except Exception as err:
-                if safe_log:
-                    safe_log(f'写入元数据线程异常：{err}')
-    return ok, len(files)
+    if skipped and safe_log:
+        safe_log(
+            '{} 个文件已有标签，按 force_retag=false 保留原样（如需覆盖请开启 force_retag）'.format(
+                skipped)
+        )
+    return ok + skipped, len(files)

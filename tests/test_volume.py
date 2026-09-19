@@ -846,5 +846,119 @@ class VolumeResolveTest(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class ReadonlyVolumeDetectionTest(unittest.TestCase):
+    """只读分卷判定与收集器必须与非只读版本语义一致。
+
+    背景（review 发现 11）：探测阶段曾调用会触发改名的非只读判定
+    （is_volume_zip 默认 readonly=False → resolve → normalize 会 os.replace
+    分卷文件名），即「只探测就改动了磁盘」。修复后探测统一走 readonly=True。
+
+    本测试锁定两条不变量：
+      1. is_volume_readonly 与 is_volume 对同一输入的判定结果一致；
+      2. collect_7z_readonly 与 collect_7z 的「是否成组」结论一致，且只读版
+         绝不改动目录内容、返回的路径都必须真实存在。
+    """
+
+    def setUp(self):
+        clear_index_cache()
+
+    def _tmpdir(self):
+        return tempfile.mkdtemp(prefix='vol_ro_test_')
+
+    def _seed(self, d, names):
+        for name in names:
+            with open(os.path.join(d, name), 'wb') as stream:
+                stream.write(b'\x00' * 64)
+
+    _CASES = (
+        ('7z 标准分卷', ['w.7z.001', 'w.7z.002', 'w.7z.003'], 'w.7z.001'),
+        ('7z 首卷存在含 .补', ['w.7z.001', 'w.7z.补'], 'w.7z.001'),
+        ('7z 仅 .补', ['w.7z.补'], 'w.7z.补'),
+        ('7z .补 无首卷', ['w.7z.补', 'w.7z.002'], 'w.7z.补'),
+        ('7z 仅 .001', ['w.7z.001'], 'w.7z.001'),
+        ('7z 缺首卷', ['w.7z.002', 'w.7z.003'], 'w.7z.002'),
+        ('rar part', ['w.part1.rar', 'w.part2.rar'], 'w.part1.rar'),
+        ('经典 zip + z01', ['w.zip', 'w.z01'], 'w.zip'),
+        ('普通单文件 zip', ['single.zip'], 'single.zip'),
+        ('普通单文件 7z', ['single.7z'], 'single.7z'),
+        ('普通单文件 rar', ['single.rar'], 'single.rar'),
+        ('数字分卷', ['w.001', 'w.002'], 'w.001'),
+    )
+
+    def test_readonly_and_writable_verdicts_agree(self):
+        """探测用的只读判定不得改变分卷识别结论。"""
+        for label, names, target in self._CASES:
+            with self.subTest(case=label):
+                verdicts = []
+                for probe in (VolumeResolver.is_volume,
+                              VolumeResolver.is_volume_readonly):
+                    d = self._tmpdir()
+                    try:
+                        self._seed(d, names)
+                        clear_index_cache()
+                        verdicts.append(bool(probe(os.path.join(d, target))))
+                    finally:
+                        shutil.rmtree(d, ignore_errors=True)
+                self.assertEqual(
+                    verdicts[0], verdicts[1],
+                    f'{label}: is_volume={verdicts[0]} '
+                    f'is_volume_readonly={verdicts[1]}')
+
+    def test_collectors_agree_and_readonly_never_renames(self):
+        from volume import collect
+
+        for label, names, target in self._CASES:
+            with self.subTest(case=label):
+                outcomes = []
+                for collector in (collect.collect_7z,
+                                  collect.collect_7z_readonly):
+                    d = self._tmpdir()
+                    try:
+                        self._seed(d, names)
+                        probe = os.path.join(d, target)
+                        result = collector(d, probe)
+                        contents = sorted(os.listdir(d))
+                        if collector is collect.collect_7z_readonly:
+                            # 只读版：不得改名，且返回路径必须真实存在。
+                            self.assertEqual(
+                                contents, sorted(names),
+                                f'{label}: 只读收集器改动了目录内容')
+                            for path in (result or []):
+                                self.assertTrue(
+                                    os.path.isfile(path),
+                                    f'{label}: 只读收集器返回不存在的路径 {path}')
+                        outcomes.append(bool(result))
+                    finally:
+                        shutil.rmtree(d, ignore_errors=True)
+                self.assertEqual(
+                    outcomes[0], outcomes[1],
+                    f'{label}: collect_7z={outcomes[0]} '
+                    f'collect_7z_readonly={outcomes[1]}')
+
+    def test_readonly_detects_buffer_volume_without_first_part(self):
+        """含 .补 且缺 .001 时应判为分卷（原只读实现会漏判）。"""
+        d = self._tmpdir()
+        try:
+            self._seed(d, ['w.7z.补', 'w.7z.002'])
+            clear_index_cache()
+            target = os.path.join(d, 'w.7z.补')
+            self.assertTrue(VolumeResolver.is_volume_readonly(target))
+            # 判定过程不得改动文件名。
+            self.assertEqual(sorted(os.listdir(d)), ['w.7z.002', 'w.7z.补'])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_readonly_does_not_rename_buffer_volume(self):
+        """回归：只读探测不得把 .补 改名为 .001。"""
+        d = self._tmpdir()
+        try:
+            self._seed(d, ['w.7z.补', 'w.7z.002'])
+            clear_index_cache()
+            VolumeResolver.peek_volumes(os.path.join(d, 'w.7z.补'))
+            self.assertIn('w.7z.补', os.listdir(d), '.补 被改名了')
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()

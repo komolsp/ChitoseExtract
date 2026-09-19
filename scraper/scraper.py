@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import contextlib
+import tempfile
 import time
 from pathlib import Path
 from urllib.request import getproxies
@@ -182,19 +183,32 @@ class Scraper(object):
         icon_path = Path(os.path.join(icon_dir, icon_name))
         jpg_path = Path(os.path.join(icon_dir, jpg_name))
 
-        if force:
-            icon_path.unlink(missing_ok=True)
-            jpg_path.unlink(missing_ok=True)
-
         if force or not icon_path.exists():
-            self.urlretrieve(cover_url, jpg_path)  # 爬取作品图片
+            # 先在临时文件里完成下载与转码，全部成功后再替换目标。
+            # 原实现先 unlink 旧图标和 cover.jpg 再下载：网络一旦失败，
+            # 旧图标已被删除、cover.jpg 只剩 urlretrieve 建出的空文件，
+            # 属于不可逆损失。临时文件与目标同目录，保证 replace 是原子改名。
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                dir=icon_dir, prefix='.cover-', suffix='.jpg')
+            os.close(tmp_fd)
+            tmp_jpg = Path(tmp_name)
+            # 保留 .ico 扩展名，让 PIL 不必依赖内容嗅探即可确定输出格式。
+            tmp_ico = tmp_jpg.with_suffix('.ico')
+            try:
+                self.urlretrieve(cover_url, tmp_jpg)  # 爬取作品图片
 
-            # 用 .jpg 文件生成 .ico 文件
-            image = img.open(jpg_path).convert('RGBA')
-            x, y = image.size
-            size = max(x, y)
-            new_im = img.new('RGBA', (size, size), (255, 255, 255, 0))
-            new_im.paste(image, ((size - x) // 2, (size - y) // 2))
-            new_im.save(icon_path, format='ICO', sizes=[(256, 256)])
+                # 用 .jpg 文件生成 .ico 文件
+                image = img.open(tmp_jpg).convert('RGBA')
+                x, y = image.size
+                size = max(x, y)
+                new_im = img.new('RGBA', (size, size), (255, 255, 255, 0))
+                new_im.paste(image, ((size - x) // 2, (size - y) // 2))
+                new_im.save(tmp_ico, format='ICO', sizes=[(256, 256)])
+
+                os.replace(tmp_jpg, jpg_path)
+                os.replace(tmp_ico, icon_path)
+            finally:
+                tmp_jpg.unlink(missing_ok=True)
+                tmp_ico.unlink(missing_ok=True)
 
         return icon_name, jpg_name  # 返回值用于后续删存操作
