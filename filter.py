@@ -244,10 +244,14 @@ class Filter():
                     self.logger.info('过滤文件: [ {} ] 命中关键词： [ {} ]'.format(file_path, matched))
                     hit = True
         if failed:
-            # 单个目标失败（例如被播放器占用）不再中断整棵作品，但仍要让用户知道
-            # 哪些没删掉，避免日志显示「过滤完成」而磁盘上仍然残留。
+            # 单个目标失败（例如被播放器占用）不中断整棵作品：走到这里时所有目标
+            # 都已尝试处理过，这里只汇总告知哪些没删掉。但失败必须跨边界上报——
+            # 否则调用方会把「目标仍残留在磁盘上」记成过滤成功，任务状态与磁盘
+            # 实际不符，且不会重试。
             shown = ' | '.join(os.path.normpath(item) for item in failed[:10])
             more = '' if len(failed) <= 10 else ' …（共 {} 个）'.format(len(failed))
             self.logger.warning(
-                '过滤完成，但有 {} 个目标未能删除，已跳过：[ {}{} ]'.format(len(failed), shown, more))
+                '过滤未完全成功，有 {} 个目标未能删除：[ {}{} ]'.format(len(failed), shown, more))
+            raise FilterDeleteError(
+                '过滤有 {} 个目标未能删除：{}{}'.format(len(failed), shown, more))
         return hit
