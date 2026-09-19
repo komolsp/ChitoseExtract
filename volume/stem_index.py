@@ -1,5 +1,7 @@
 """按 stem 预聚类目录内分卷文件。"""
 
+from __future__ import annotations
+
 import os
 
 from volume import parse

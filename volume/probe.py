@@ -1,5 +1,7 @@
 """7-Zip 分卷缺失提示反推补卷。"""
 
+from __future__ import annotations
+
 import difflib
 import os
 import re

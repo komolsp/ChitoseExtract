@@ -1,5 +1,7 @@
 """分卷文件名解析（标准命名 + 改后缀/插字）。"""
 
+from __future__ import annotations
+
 import os
 import re
 

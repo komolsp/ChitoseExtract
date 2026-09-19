@@ -1,5 +1,7 @@
 """分卷组试读校验：同目录多候选时避免误绑独立压缩包。"""
 
+from __future__ import annotations
+
 import os
 import re
 import subprocess

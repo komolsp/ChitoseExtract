@@ -1,5 +1,7 @@
 """分卷规范化为 7-Zip 可识别命名。"""
 
+from __future__ import annotations
+
 import os
 import re
 

@@ -3,6 +3,8 @@
 集中持有状态与服务引用，支撑已拆分的编排器、扫描器、执行器、处理器及兼容入口。
 """
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from typing import Any

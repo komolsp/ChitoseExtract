@@ -1,5 +1,7 @@
 """过滤规则定义与 config 解析（无 task_runner 依赖，避免循环导入）。"""
 
+from __future__ import annotations
+
 import re
 from typing import Any
 

@@ -1,5 +1,7 @@
 """分卷解析入口：目录索引 + 多策略聚组。"""
 
+from __future__ import annotations
+
 import os
 import re
 

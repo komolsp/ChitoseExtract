@@ -1,5 +1,7 @@
 """与 GUI 无关的工作流步骤调度器。"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Callable
 

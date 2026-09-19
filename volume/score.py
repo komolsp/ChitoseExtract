@@ -1,5 +1,7 @@
 """分卷组置信度评分。"""
 
+from __future__ import annotations
+
 import os
 
 from volume import magic, parse

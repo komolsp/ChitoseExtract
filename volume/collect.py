@@ -1,5 +1,7 @@
 """分卷收集：同目录下聚组。"""
 
+from __future__ import annotations
+
 import os
 import re
 from collections import defaultdict
