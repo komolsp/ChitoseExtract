@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 import os
 
@@ -68,28 +70,45 @@ def prioritize_latest_hits(passwords: list[Password]) -> list[Password]:
     return fast_lane + [pwd for pwd in ordered if pwd not in fast_lane]
 
 
+def _read_password_text(path: str) -> str:
+    """读取密码库文本；非 UTF-8 文件不再让整个程序启动失败。
+
+    用户常用记事本以 ANSI/GBK 另存 password.txt（密码含日文/中文时尤其常见），
+    固定 encoding='utf-8' 会抛 UnicodeDecodeError；该调用点在 main.py 的启动异常
+    处理里，会让程序每次启动都直接失败，用户只能手工找到并修复该文件。
+    """
+    with open(path, 'rb') as file:
+        raw = file.read()
+    for encoding in ('utf-8-sig', 'utf-8', 'cp932', 'gbk'):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    # 全部编码都失败时仍以替换字符继续，保证程序能启动。
+    return raw.decode('utf-8', errors='replace')
+
+
 def read_password(path: str = PASSWORD_PATH):
     tmp = []
     if not os.path.isfile(path):
         return tmp
-    with open(path, "r", encoding='utf-8') as file:
-        for line in file.readlines():
-            line = line.strip('\n').strip('\r')  # 去掉换行符
-            # 跳过空行 / 仅含空白或制表符的行，避免脏行导致整个程序启动崩溃
-            if not line.strip():
-                continue
-            str_pw = line.split("\t")
-            pw_text = str_pw[0]
-            if not pw_text:
-                # 密码本体为空则忽略该行（例如误存了 "\t..." 这样的脏数据）
-                continue
-            add_date = str_pw[1] if len(str_pw) > 1 and str_pw[1] else str(datetime.datetime.now().date())
-            try:
-                hit_count = int(str_pw[2]) if len(str_pw) > 2 and str_pw[2] else 0
-            except ValueError:
-                hit_count = 0
-            last_hit_date = str_pw[3] if len(str_pw) > 3 else ''
-            tmp.append(Password(pw_text, add_date, hit_count, last_hit_date))
+    for line in _read_password_text(path).splitlines():
+        line = line.strip('\n').strip('\r')  # 去掉换行符
+        # 跳过空行 / 仅含空白或制表符的行，避免脏行导致整个程序启动崩溃
+        if not line.strip():
+            continue
+        str_pw = line.split("\t")
+        pw_text = str_pw[0]
+        if not pw_text:
+            # 密码本体为空则忽略该行（例如误存了 "\t..." 这样的脏数据）
+            continue
+        add_date = str_pw[1] if len(str_pw) > 1 and str_pw[1] else str(datetime.datetime.now().date())
+        try:
+            hit_count = int(str_pw[2]) if len(str_pw) > 2 and str_pw[2] else 0
+        except ValueError:
+            hit_count = 0
+        last_hit_date = str_pw[3] if len(str_pw) > 3 else ''
+        tmp.append(Password(pw_text, add_date, hit_count, last_hit_date))
     return tmp
 
 
