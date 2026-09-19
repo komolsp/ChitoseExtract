@@ -275,10 +275,28 @@ def main():
         'scraper.langs.zh_tw',
     ]
 
+    # 发布包绝不能携带开发机上的 config.yaml / password.txt：前者含本机音声库
+    # 路径，后者含用户解压密码，随包分发即隐私泄漏（已发布的旧包正是如此）。
+    # 改为打包「默认模板 + 空密码库」，新用户拿到开发机路径本来也无法使用。
+    release_dir = os.path.join(BUILD_DIR, 'release-defaults')
+    os.makedirs(release_dir, exist_ok=True)
+    release_config = os.path.join(release_dir, 'config.yaml')
+    release_config_template = (
+        '# ChitoseExtract 默认配置（发布模板）\n'
+        '# path.output 为必填项：请改为本机音声库输出目录后再启动。\n'
+        'path:\n'
+        "  output: ''\n"
+    )
+    with open(release_config, 'w', encoding='utf-8') as handle:
+        handle.write(release_config_template)
+    release_password = os.path.join(release_dir, 'password.txt')
+    with open(release_password, 'w', encoding='utf-8') as handle:
+        handle.write('')
+
     add_data = [
         _add_data(os.path.join(ROOT, 'assets'), 'assets'),
-        _add_data(os.path.join(ROOT, 'config.yaml'), '.'),
-        _add_data(os.path.join(ROOT, 'password.txt'), '.'),
+        _add_data(release_config, '.'),
+        _add_data(release_password, '.'),
         _add_data(seven_zip, '7zip'),
         _add_data(flac_bundle, 'flac'),
     ]
@@ -323,18 +341,15 @@ def main():
         if os.path.isdir(dist_ffmpeg):
             shutil.rmtree(dist_ffmpeg)
         shutil.copytree(ffmpeg_minimal, dist_ffmpeg)
-    for name in ('config.yaml', 'password.txt'):
-        src = os.path.join(ROOT, name)
-        dst = os.path.join(DIST, name)
-        if os.path.isfile(src):
-            shutil.copy2(src, dst)
+    shutil.copy2(release_config, os.path.join(DIST, 'config.yaml'))
+    shutil.copy2(release_password, os.path.join(DIST, 'password.txt'))
 
     exe_path = os.path.join(DIST, f'{APP_NAME}.exe')
     verify_build_output(exe_path)
     print()
     print('Build complete:')
     print(' ', exe_path)
-    print('Place config.yaml / password.txt beside the exe (already copied to dist/).')
+    print('dist/ 内为默认模板 config.yaml 与空 password.txt（不含本机配置）。')
     print('Bundled 7-Zip copied to dist/7zip/ (also embedded in exe).')
     print('Bundled flac copied to dist/flac/ (also embedded in exe).')
     if ffmpeg_minimal:
