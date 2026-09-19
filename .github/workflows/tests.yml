@@ -31,5 +31,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Prepare config for tests
+        # config.yaml 被 .gitignore 忽略，干净检出里不存在；而测试会构造
+        # config.Config()，缺文件即抛 ConfigError，导致 CI 从未通过。
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'chitose-output'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          "path:`n  output: '$out'" | Out-File -Encoding utf8 config.yaml
+          Get-Content config.yaml
+
       - name: Run unit tests
         run: python -W ignore::ResourceWarning -m unittest discover -s tests -q
