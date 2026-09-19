@@ -129,12 +129,28 @@ def _monitor(result_queue, lock, list_counters, list_progress, list_events, list
     while True:
         try:
             item = result_queue.get(timeout=0.5)
-            if item is None:
-                break
+        except queue.Empty:
+            continue
+        if item is None:
+            break
+        try:
             list_id, result = item
             count_result(result, list_counters, list_events, list_id, list_status, lock, list_progress, log_queue, list_cancelled)
-        except queue.Empty:
-            pass
+        except Exception as err:
+            # 单个结果处理失败不能终止监控：监控一旦退出就再没有人 set
+            # list_events，等待该事件的工作线程会永久挂住，界面停在「解压中」
+            # 且只能强杀进程。这里把对应 list 标记为失败并唤醒等待方。
+            try:
+                failed_id = item[0]
+                with lock:
+                    list_cancelled[failed_id] = True
+                    list_status[failed_id] = {'completed': False, 'error': '结果处理异常：{}'.format(err)}
+                event = list_events.get(failed_id)
+                if event is not None:
+                    event.set()
+                log_queue.put((failed_id, '解压结果处理异常：{}'.format(err)))
+            except Exception:
+                pass
 
 
 def count_result(result, list_counters, list_events, list_id: str, list_status, lock, progress, log_queue, list_cancelled):
