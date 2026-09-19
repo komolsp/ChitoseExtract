@@ -1,0 +1,8 @@
+# Windows 批处理脚本必须使用 CRLF：cmd.exe 在 LF-only 换行下会错误解析
+# 跨行 if (...) 块，导致条件为假的分支也被执行（且不报错）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell / VBS 同样按 Windows 换行规范化。
+*.ps1 text eol=crlf
+*.vbs text eol=crlf

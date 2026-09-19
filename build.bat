@@ -3,15 +3,14 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
+REM 打包只使用项目自带环境，避免系统解释器带来的依赖版本漂移。
 set "PYTHON=%~dp0.venv\Scripts\python.exe"
 if not exist "%PYTHON%" (
-    for /f "delims=" %%i in ('where python 2^>nul') do if not defined FALLBACK_PY set "FALLBACK_PY=%%~fi"
-    if not defined FALLBACK_PY (
-        echo 未找到 Python。请先创建 .venv 或安装 Python 3.9+。
-        pause
-        exit /b 1
-    )
-    set "PYTHON=%FALLBACK_PY%"
+    echo 未找到项目自带环境 .venv，已中止。请先创建：
+    echo     python -m venv .venv
+    echo     .venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+    pause
+    exit /b 1
 )
 
 echo 使用 Python: %PYTHON%

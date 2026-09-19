@@ -5,33 +5,18 @@ cd /d "%~dp0"
 
 set "ERRLOG=%~dp0startup_error.log"
 set "FALLBACK_LOG=%TEMP%\ChitoseExtract_startup.log"
-set "PYW="
+set "VENV_PY=%~dp0.venv\Scripts\python.exe"
+set "VENV_PYW=%~dp0.venv\Scripts\pythonw.exe"
 set "PY="
+set "PYW="
 
-REM Prefer a project-local virtual environment.
-call :try_candidate "%~dp0.venv\Scripts\python.exe"
-if defined PYW goto :launch
+REM Only the project-local virtual environment is accepted. Never fall back to a
+REM system interpreter: a stray Python can import every dependency while carrying
+REM versions that differ from requirements-lock.txt (e.g. peewee 3.18 vs 4.2),
+REM which fails silently during a run instead of here at startup.
+call :try_venv
+if not defined PY goto :missing_venv
 
-REM 1) Registry real Python (skip aliases and incomplete environments)
-for %%V in (3.13 3.12 3.11 3.10 3.9) do (
-    if not defined PYW call :try_reg_python "HKCU\SOFTWARE\Python\PythonCore\%%V\InstallPath"
-    if not defined PYW call :try_reg_python "HKLM\SOFTWARE\Python\PythonCore\%%V\InstallPath"
-)
-if defined PYW goto :launch
-
-REM 2) PATH Python, accepted only when all application dependencies import.
-for /f "delims=" %%i in ('where python 2^>nul') do (
-    if not defined PYW call :try_candidate "%%~fi"
-)
-if defined PYW goto :launch
-
-if not defined PYW (
-    call :log_line "No compatible Python found. Python 3.9+ and requirements.txt are required."
-    mshta "javascript:alert('No compatible Python was found.\nInstall Python 3.9+ and run: pip install -r requirements.txt\nSee startup_error.log or %%TEMP%%\\ChitoseExtract_startup.log');close()"
-    exit /b 1
-)
-
-:launch
 if /i "%~1"=="--check" (
     echo PY=%PY%
     echo PYW=%PYW%
@@ -46,32 +31,33 @@ REM Do not use start /B: hidden console exit may kill the child (looks like no r
 start "" "%PYW%" "%~dp0main.py"
 exit /b 0
 
-:try_reg_python
-set "REGPYW="
-for /f "tokens=2*" %%A in ('reg query "%~1" /v WindowedExecutablePath 2^>nul') do (
-    set "REGPYW=%%~B"
-)
-for /f "tokens=2*" %%A in ('reg query "%~1" /v ExecutablePath 2^>nul') do (
-    call :try_candidate "%%~B" "%REGPYW%"
-)
-if defined PYW exit /b 0
-for /f "tokens=2*" %%A in ('reg query "%~1" /ve 2^>nul') do (
-    call :try_candidate "%%~Bpython.exe"
-)
+:try_venv
+if not exist "%VENV_PY%" exit /b 0
+"%VENV_PY%" "%~dp0check_runtime.py" >nul 2>&1
+if errorlevel 1 exit /b 0
+set "PY=%VENV_PY%"
+if exist "%VENV_PYW%" (set "PYW=%VENV_PYW%") else (set "PYW=%VENV_PY%")
 exit /b 0
 
-:try_candidate
-if not exist "%~1" exit /b 0
-for %%F in ("%~1") do if "%%~zF"=="0" exit /b 0
-"%~1" "%~dp0check_runtime.py" >nul 2>&1
-if errorlevel 1 exit /b 0
-for %%F in ("%~1") do (
-    set "PY=%%~fF"
-    if exist "%%~dpFpythonw.exe" set "PYW=%%~dpFpythonw.exe"
+:missing_venv
+REM Do not put parentheses in these values: they are assigned inside an if-block,
+REM and cmd closes the block early on a stray ')'.
+if exist "%VENV_PY%" (
+    set "REASON=Project .venv is unusable - Python 3.9+ or dependencies missing."
+    set "HINT=Repair it with:\n  .venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+) else (
+    set "REASON=Project .venv not found."
+    set "HINT=Create it first - Python 3.9+ required:\n  python -m venv .venv\n  .venv\\Scripts\\python.exe -m pip install -r requirements.txt"
 )
-if not "%~2"=="" if exist "%~2" set "PYW=%~2"
-if not defined PYW set "PYW=%PY%"
-exit /b 0
+call :log_line "%REASON%"
+REM --check is a diagnostic probe: report on stderr and exit non-zero, never
+REM block on a modal dialog.
+if /i "%~1"=="--check" (
+    echo %REASON% 1>&2
+    exit /b 1
+)
+mshta "javascript:alert('%REASON%\n\n%HINT%\n\nSee startup_error.log');close()"
+exit /b 1
 
 :log_line
 >>"%ERRLOG%" 2>nul echo [%date% %time%] %~1

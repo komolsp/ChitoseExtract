@@ -53,22 +53,31 @@
 
 ### 安装依赖
 
+程序**只使用项目自带的 `.venv`**，不会回退到系统上的其他 Python。
+请先在项目根目录创建并安装依赖：
+
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+> 为什么必须用自带环境：系统 Python 可能装齐了全部依赖却版本不同
+> （例如 `peewee` 3.18 与 `requirements-lock.txt` 要求的 4.2），
+> 这类差异不会在启动时报错，而是在运行中静默出错。
 
 ### 启动
 
 ```bash
-python main.py
+.venv\Scripts\python.exe main.py
 ```
 
-或使用无控制台启动脚本：
+或使用无控制台启动脚本（同样只认 `.venv`）：
 
 ```bash
 launch.bat
 ```
 
+`.venv` 缺失或依赖不完整时，启动脚本会直接报错并提示修复命令，不再挑选其他解释器。
 启动失败时请查看同目录下的 `startup_error.log`。
 
 ---
@@ -161,8 +170,7 @@ workflow_steps:
 ## 运行测试
 
 ```bash
-pip install -r requirements.txt
-python -W ignore::ResourceWarning -m unittest discover -s tests -q
+.venv\Scripts\python.exe -W ignore::ResourceWarning -m unittest discover -s tests -q
 ```
 
 当前测试套件共 **297** 项，覆盖分卷解析、扫描队列、解压调度、单任务状态转换、嵌套解压、密码处理、过滤规则、音频转换等核心逻辑。
