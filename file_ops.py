@@ -1,4 +1,6 @@
-﻿import difflib
+from __future__ import annotations
+
+import difflib
 import os
 import re
 import shutil
@@ -1584,6 +1586,23 @@ def is_dir_path(path: str) -> bool:
     return os.path.isdir(path)
 
 
+def is_reparse_point(path: str) -> bool:
+    """是否为 junction / 符号链接等重解析点。
+
+    手写递归遍历（_walk_dirpaths_bottom_up）用 is_dir_path 判断子目录，会把
+    junction 当作普通目录进入；os.walk(followlinks=False) 则会跳过它们。二者
+    语义必须对齐，否则删除/改名会作用到链接目标里的真实目录。
+    """
+    if sys.platform == 'win32':
+        try:
+            import win32con
+            attrs = _win_file_attributes(path)
+            return bool(attrs & win32con.FILE_ATTRIBUTE_REPARSE_POINT)
+        except Exception:
+            return False
+    return os.path.islink(path)
+
+
 def is_path_under(root: str, path: str) -> bool:
     """path 是否位于 root 之下（含 root 自身）。"""
     if not root or not path:
@@ -1619,6 +1638,20 @@ def list_dir_names(dir_path: str) -> list[str]:
         return os.listdir(dir_path)
     except OSError:
         return []
+
+
+def _list_dir_names_strict(dir_path: str) -> list[str] | None:
+    """列出目录内容；失败返回 None，与「目录是空的」区分开。
+
+    list_dir_names 把 OSError 折叠成空列表，用于「外壳是否可折叠」判断时会把
+    列目录失败当成「外壳是空的」，随后折叠逻辑无条件删除仍有内容的目录。
+    超过 MAX_PATH 的深层目录、断连的网络盘、被杀软临时占用的目录都会触发。
+    """
+    try:
+        return os.listdir(dir_path)
+    except OSError as err:
+        logger.error('列出目录内容失败，已跳过该目录以免误删内容：[{}]: {}'.format(dir_path, err))
+        return None
 
 
 def _unnest_visible_entries(dir_path: str) -> list[str]:
@@ -1682,28 +1715,35 @@ def is_wrapper_dir(dir_path: str) -> bool:
     return is_dir_path(only)
 
 
-def _hard_remove_dir_path(dir_path: str):
-    clear_shell_folder_attributes(dir_path)
-    shutil.rmtree(dir_path, ignore_errors=True)
-
-
 def _remove_dir_path(dir_path: str):
-    if _discard_dir_path_hook:
-        try:
-            _discard_dir_path_hook(dir_path)
-            return
-        except Exception as err:
-            logger.error('套娃文件夹移入回收站失败，改为直接删除：[{}]: {}'.format(dir_path, err))
-    _hard_remove_dir_path(dir_path)
+    """移除套娃外壳 / 垃圾元数据目录；必须经回收站钩子，绝不静默永久删除。
+
+    历史上这里在没有钩子时回退到 shutil.rmtree(ignore_errors=True)：既绕过
+    logical_deletion 的回收站预期，又把删除失败完全吞掉。而钩子只在
+    task_runner.reload() 注册，子进程与启动直连路径里恒为 None。
+    现在宁可保留目录并报错，交由用户处理，也不静默永久丢失内容。
+    """
+    if not _discard_dir_path_hook:
+        logger.error('未注册目录回收站钩子，已跳过删除以免永久丢失内容：[{}]'.format(dir_path))
+        return
+    try:
+        _discard_dir_path_hook(dir_path)
+    except Exception as err:
+        logger.error('移入回收站失败，已保留原目录：[{}]: {}'.format(dir_path, err))
 
 
 def _hoist_wrapper_dir(wrapper: str, parent: str):
-    logger.info('移除套娃文件夹：[{}] 内容上移至 [{}]'.format(
-        os.path.normpath(wrapper), os.path.normpath(parent)))
     if not is_dir_path(wrapper) or not path_exists(wrapper):
         return
+    items = _list_dir_names_strict(wrapper)
+    if items is None:
+        # 列目录失败时必须中止：函数收尾会无条件删除整个 wrapper，
+        # 把「读不到」当成「是空的」会连同内容一起删掉。
+        return
+    logger.info('移除套娃文件夹：[{}] 内容上移至 [{}]'.format(
+        os.path.normpath(wrapper), os.path.normpath(parent)))
     wrapper_norm = os.path.normcase(os.path.normpath(wrapper))
-    for item in list_dir_names(wrapper):
+    for item in items:
         src = join_dir(wrapper, item)
         dest = join_dir(parent, item)
         if is_dir_path(src) and path_exists(dest):
@@ -1721,7 +1761,9 @@ def _hoist_wrapper_dir(wrapper: str, parent: str):
                 import win32file
                 win32file.MoveFile(_extended_path(src), _extended_path(dest))
                 continue
-            except OSError:
+            except Exception:
+                # pywintypes.error 不是 OSError（MRO 只到 Exception），
+                # 用 except OSError 会让回退分支永不执行、异常直接冒泡出拍平流程。
                 pass
         shutil.move(src, dest)
     clear_shell_folder_attributes(wrapper)
@@ -1738,7 +1780,9 @@ def _walk_dirpaths_bottom_up(root: str) -> list[tuple[str, list[str]]]:
         subdirs = []
         for name in names:
             child = join_dir(dirpath, name)
-            if is_dir_path(child):
+            # 不进入 junction / 符号链接等重解析点：os.walk(followlinks=False) 会
+            # 跳过它们，这里也必须跳过，否则删除/改名会作用到链接目标里的真实目录。
+            if is_dir_path(child) and not is_reparse_point(child):
                 subdirs.append(name)
                 visit(child)
         collected.append((dirpath, subdirs))

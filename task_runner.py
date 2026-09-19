@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import os
 import re
@@ -100,6 +102,9 @@ def bind_runtime_services(
         renamer = rename_service
     if progress_service is not _RUNTIME_UNSET:
         progress_ui = progress_service
+    # 目录移入回收站的钩子属于运行时依赖，只在这里注册：启动、重载、测试等
+    # 所有绑定链路都能保证 file_ops 不会在无钩子时永久删除目录。
+    file_ops.set_discard_dir_path_hook(_discard_wrapper_dir)
     return _sync_context_services()
 
 
@@ -2132,15 +2137,23 @@ def unzip(timeline: Timeline):
 
         source_removed = False
         if merge_mode == 'same_name_staging':
-            # 源压缩包保持原名与位置不动；仅当用户开启「解压后删除」且删除成功后，
-            # 才将暂存目录提升为与压缩包同名的作品文件夹。
+            # 源压缩包保持原名与位置不动；仅当用户开启「解压后删除」时，先把暂存
+            # 目录提升为与压缩包同名的作品文件夹，确认产物就位后再删源。
+            # 顺序不能反过来：先删源再移动，一旦移动失败源已消失、产物滞留暂存区，
+            # 用户在作品目录里什么都看不到；旧实现还会在 work_root 已存在时照样
+            # 删源却跳过移动。
             work_root = _legacy_top_work_root(zip)
-            if zip.del_after_unzip and os.path.isfile(zip.path):
-                source_removed = delete_file(zip.path)
-                if source_removed and not os.path.exists(work_root):
+            if zip.del_after_unzip and os.path.isfile(zip.path) and not os.path.exists(work_root):
+                try:
                     shutil.move(output_path, work_root)
+                except Exception as err:
+                    if logger:
+                        logger.error('提升解压产物失败，已保留源压缩包：[{}] -> [{}]: {}'.format(
+                            output_path, work_root, err))
+                else:
                     _remap_work_root(output_path, work_root)
                     output_path = work_root
+                    source_removed = delete_file(zip.path)
         elif merge_mode == 'top_staging':
             work_root = _intended_top_work_root(zip)
             base = work_root
@@ -3376,7 +3389,6 @@ def _discard_wrapper_dir(dir_path: str):
 
 def reload():
     new_conf = config.Config()
-    file_ops.set_discard_dir_path_hook(_discard_wrapper_dir)
     new_passwords = password.read_password()
     new_filter = filter_module.Filter(
         new_conf.filter_kw, new_conf.filter_dir, logger,

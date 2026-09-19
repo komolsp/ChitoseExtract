@@ -1,5 +1,7 @@
 """分卷重命名（rename 失败时 copy+delete）。"""
 
+from __future__ import annotations
+
 import os
 import re
 import shutil
@@ -69,8 +71,18 @@ def _safe_copy_replace(src: str, dest: str) -> bool:
 
 
 def safe_rename(src: str, dest: str) -> bool:
+    """移动 / 改名；目标已存在时拒绝覆盖。
+
+    os.replace 在 Windows 上会静默覆盖已存在的 dest，而同文件的
+    _safe_copy_replace 明确拒绝覆盖（注释写着「dest 已存在时不删除 src」），
+    两者语义必须一致：浏览器重复下载产生的 X.zip(1) 不应该顶掉 X.zip，
+    被覆盖的内容既进不了回收站也没有日志。
+    """
     if os.path.normcase(src) == os.path.normcase(dest):
         return True
+    if os.path.exists(dest):
+        _logger.warning('分卷改名目标已存在，放弃改名以免覆盖：[{}] -> [{}]'.format(src, dest))
+        return False
     try:
         os.replace(src, dest)
         return True
