@@ -3,6 +3,7 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
-# PowerShell / VBS 同样按 Windows 换行规范化。
+# PowerShell / VBS 同样按 Windows 换行规范化。VBS 保持纯 ASCII，避免
+# Git 对 UTF-16 文件执行文本换行转换时破坏双字节编码。
 *.ps1 text eol=crlf
 *.vbs text eol=crlf
