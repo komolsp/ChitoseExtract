@@ -37,6 +37,13 @@ class TestMetadataLocaleRefresh(unittest.TestCase):
 
 
 class TestCachedScraperRefresh(unittest.TestCase):
+    def setUp(self):
+        # 干净检出中不存在本地 cache.db；测试不能依赖开发机遗留的数据表。
+        from scraper.db import WorkMetadataCache, db
+
+        db.connect(reuse_if_open=True)
+        db.create_tables([WorkMetadataCache], safe=True)
+
     def test_refreshes_stale_cache_entry(self):
         from scraper.db import WorkMetadataCache, db
 

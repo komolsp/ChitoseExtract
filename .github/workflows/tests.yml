@@ -36,8 +36,9 @@ jobs:
         # config.Config()，缺文件即抛 ConfigError，导致 CI 从未通过。
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'chitose-output'
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          "path:`n  output: '$out'" | Out-File -Encoding utf8 config.yaml
+          $recycle = Join-Path $env:RUNNER_TEMP 'chitose-recycle'
+          New-Item -ItemType Directory -Force -Path $out, $recycle | Out-Null
+          "path:`n  output: '$out'`n  recycle: '$recycle'" | Out-File -Encoding utf8 config.yaml
           Get-Content config.yaml
 
       - name: Run unit tests
