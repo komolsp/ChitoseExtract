@@ -1,4 +1,4 @@
-# ChitoseExtract v1.0
+# ChitoseExtract v1.04
 
 面向 **DLsite 同人音声** 的 Windows 桌面批处理工具。
 ---
@@ -222,7 +222,7 @@ output: D:/音声/目录
 ## 版本信息
 
 - **程序名称**：ChitoseExtract
-- **当前版本**：v1.0
+- **当前版本**：v1.04
 - **平台**：Windows
 
 ---

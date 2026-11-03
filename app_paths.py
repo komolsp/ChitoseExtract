@@ -5,7 +5,7 @@ import shutil
 import sys
 
 APP_NAME = 'ChitoseExtract'
-APP_VERSION = 'v1.0'
+APP_VERSION = 'v1.04'
 APP_TITLE = f'{APP_NAME} {APP_VERSION}'
 LEGACY_STAGING_DIR_NAMES = frozenset({'Prekikoeru-KM'})
 

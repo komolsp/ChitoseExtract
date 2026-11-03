@@ -3,7 +3,14 @@ import tempfile
 import unittest
 import wave
 
-from audio_tagger import build_tag_values, _format_cv_list, _format_title, tag_file
+from audio_tagger import (
+    TAG_SKIPPED,
+    TAG_WRITTEN,
+    _format_cv_list,
+    _format_title,
+    _tag_file_status,
+    build_tag_values,
+)
 from scraper.work_metadata import WorkMetadata
 
 class AudioTaggerTests(unittest.TestCase):
@@ -73,12 +80,13 @@ class AudioTaggerTests(unittest.TestCase):
                 handle.setframerate(44100)
                 handle.writeframes(b'\x00\x00' * 100)
 
-            self.assertTrue(
-                tag_file(
-                    path,
-                    metadata,
-                    {'extensions': ['.flac', '.mp3', '.wav'], 'embed_cover': False},
-                )
+            config = {
+                'extensions': ['.flac', '.mp3', '.wav'],
+                'embed_cover': False,
+            }
+            self.assertEqual(
+                _tag_file_status(path, metadata, config),
+                TAG_WRITTEN,
             )
 
             from mutagen.wave import WAVE
@@ -87,6 +95,21 @@ class AudioTaggerTests(unittest.TestCase):
             self.assertEqual(audio.tags.get('TIT2').text[0], '01_track')
             self.assertEqual(audio.tags.get('TALB').text[0], '测试作品')
             self.assertEqual(audio.tags.get('TPE1').text[0], '声優A')
+
+            # 第二次写入前必须核对；内容完全一致时才跳过。
+            self.assertEqual(
+                _tag_file_status(path, metadata, config),
+                TAG_SKIPPED,
+            )
+
+            # 只要本程序负责的字段有误，就不能因为“已有标签”直接跳过。
+            audio.tags.get('TALB').text = ['错误作品名']
+            audio.save()
+            self.assertEqual(
+                _tag_file_status(path, metadata, config),
+                TAG_WRITTEN,
+            )
+            self.assertEqual(WAVE(path).tags.get('TALB').text[0], '测试作品')
 
 
 if __name__ == '__main__':

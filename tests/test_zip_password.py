@@ -538,6 +538,34 @@ class UnzipperOuterPasswordTests(unittest.TestCase):
                 ['', 'pw1', 'pw2'],
             )
 
+    def test_unencrypted_covered_extract_rejects_numeric_zst_garbage(self):
+        from unzip_process_pool import ProcessResourceManager
+        from unzipper import Unzipper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carrier = os.path.join(tmp, 'real-video.mov')
+            output_path = os.path.join(tmp, 'out')
+            os.makedirs(output_path)
+            with open(carrier, 'wb') as fh:
+                fh.write(b'\x00' * 32)
+            for name, payload in (
+                ('1', b'video bytes'),
+                ('2.zst', b'\x28\xb5\x2f\xfd'),
+                ('3', b'more video bytes'),
+            ):
+                with open(os.path.join(output_path, name), 'wb') as fh:
+                    fh.write(payload)
+
+            archive = Zip(carrier, [], False, covered=True)
+            archive.file_list = ['1', '2.zst', '3']
+            archive.compression_ratio_info = {'encrypted': False}
+            unzipper = Unzipper(mock.MagicMock(), ProcessResourceManager(4))
+            unzipper._run_single_unzip = mock.MagicMock(return_value=(0, ''))
+
+            self.assertFalse(unzipper.single_threaded_unzip(archive, output_path))
+            self.assertFalse(archive.is_namelist_current())
+            unzipper.logger.warning.assert_called_once()
+
     def test_covered_carrier_uses_one_full_unzip_path(self):
         from unzip_process_pool import ProcessResourceManager
         from unzipper import Unzipper

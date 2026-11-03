@@ -167,7 +167,10 @@ class ProbeArchiveMp4StegoTest(unittest.TestCase):
         moov_size = 4096
         moov = struct.pack('>I', moov_size) + b'moov' + b'\x00' * (moov_size - 8)
         padding = b'\x00' * zip_offset_in_mdat
-        zip_tail = b'PK\x05\x06' + b'\x00' * 16
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('hidden.txt', b'payload')
+        zip_tail = archive.getvalue()
         mdat_payload = padding + zip_tail
         mdat_header = struct.pack('>I', 8 + len(mdat_payload)) + b'mdat'
         with open(path, 'wb') as f:
@@ -269,6 +272,43 @@ class ProbeArchiveMp4StegoTest(unittest.TestCase):
             probe = probe_archive(path, nested=True)
             self.assertFalse(probe.is_candidate)
             self.assertFalse(probe_archive(path, nested=False).is_candidate)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_quicktime_sample_then_nal_layout_is_real_video(self):
+        """MOV 可先写样本长度，再在样本内写 NAL 长度；不能因此扫描随机魔数。"""
+        d = self._tmpdir()
+        try:
+            path = os.path.join(d, 'quicktime.mov')
+            ftyp = struct.pack('>I', 20) + b'ftyp' + b'qt  ' + b'\x00\x00\x02\x00' + b'qt  '
+            wide = struct.pack('>I', 8) + b'wide'
+            sei = b'\x06\x05' + b'x' * 28
+            sample_length = 512
+            sample = struct.pack('>I', len(sei)) + sei
+            sample += b'\xaa' * (sample_length - len(sample))
+            # 模拟真实码流中偶然出现但头字段无效的 ZIP 魔数。
+            sample = sample[:300] + b'PK\x03\x04' + b'\x00' * 40 + sample[344:]
+            mdat = struct.pack('>I', 0) + b'mdat' + struct.pack('>I', sample_length) + sample
+            with open(path, 'wb') as f:
+                f.write(ftyp + wide + mdat)
+
+            self.assertFalse(probe_archive(path, nested=False).is_candidate)
+            self.assertFalse(probe_archive(path, nested=True).is_candidate)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_mdat_random_pk_bytes_require_valid_archive_header(self):
+        d = self._tmpdir()
+        try:
+            path = os.path.join(d, 'random-pk.mov')
+            ftyp = struct.pack('>I', 20) + b'ftyp' + b'qt  ' + b'\x00\x00\x02\x00' + b'qt  '
+            payload = b'\xff' * 4096 + b'PK\x03\x04' + b'\x00' * 128
+            mdat = struct.pack('>I', 8 + len(payload)) + b'mdat' + payload
+            with open(path, 'wb') as f:
+                f.write(ftyp + mdat)
+
+            self.assertFalse(probe_archive(path, nested=False).is_candidate)
+            self.assertFalse(probe_archive(path, nested=True).is_candidate)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

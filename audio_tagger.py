@@ -202,6 +202,95 @@ def _has_existing_tags(path: str, ext: str) -> bool:
     return bool(getattr(audio, 'tags', None))
 
 
+def _tag_text(value) -> list[str]:
+    """把 mutagen 的文本标签统一为可比较的字符串列表。"""
+    if value is None:
+        return []
+    value = getattr(value, 'text', value)
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def _text_tag_matches(tags, key: str, expected: str) -> bool:
+    actual = _tag_text(tags.get(key)) if tags is not None else []
+    return actual == ([expected] if expected else [])
+
+
+def _flac_tags_match(audio, values: dict[str, str], cover_bytes: bytes | None) -> bool:
+    tags = getattr(audio, 'tags', None)
+    fields = {
+        'title': 'title',
+        'album': 'album',
+        'artist': 'artist',
+        'albumartist': 'albumartist',
+        'date': 'date',
+        'year': 'year',
+        'genre': 'genre',
+        'series': 'series',
+        'comment': 'rjcode',
+        'keywords': 'tags',
+    }
+    if not all(
+            _text_tag_matches(tags, tag_name, values[value_name])
+            for tag_name, value_name in fields.items()):
+        return False
+    if cover_bytes is None:
+        return True
+    return any(
+        getattr(picture, 'type', None) == 3
+        and getattr(picture, 'data', None) == cover_bytes
+        for picture in (getattr(audio, 'pictures', None) or [])
+    )
+
+
+def _id3_tags_match(audio, values: dict[str, str], cover_bytes: bytes | None) -> bool:
+    tags = getattr(audio, 'tags', None)
+    fields = {
+        'TIT2': 'title',
+        'TALB': 'album',
+        'TPE1': 'artist',
+        'TPE2': 'albumartist',
+        'TDRC': 'year',
+        'TCON': 'genre',
+        'TXXX:Series': 'series',
+        'TXXX:RJcode': 'rjcode',
+    }
+    if not all(
+            _text_tag_matches(tags, tag_name, values[value_name])
+            for tag_name, value_name in fields.items()):
+        return False
+    if cover_bytes is None:
+        return True
+    return any(
+        getattr(picture, 'type', None) == 3
+        and getattr(picture, 'data', None) == cover_bytes
+        for picture in (tags.getall('APIC') if tags is not None else [])
+    )
+
+
+def _existing_tags_are_correct(
+        path: str,
+        ext: str,
+        values: dict[str, str],
+        cover_bytes: bytes | None,
+) -> bool:
+    """现有标签是否与本程序本次准备写入的字段完全一致。"""
+    try:
+        if ext == '.flac':
+            return _flac_tags_match(FLAC(path), values, cover_bytes)
+        if ext == '.mp3':
+            audio = MP3(path, ID3=ID3)
+        elif ext in ('.wav', '.wave'):
+            audio = WAVE(path)
+        else:
+            return False
+        return _id3_tags_match(audio, values, cover_bytes)
+    except Exception:
+        # 无法完成核对时不能声称标签正确；继续走写入流程，由写入阶段给出结果。
+        return False
+
+
 def save_cover_jpg(folder: str, cover_bytes: bytes) -> None:
     if not cover_bytes:
         return
@@ -316,18 +405,21 @@ def _tag_file_status(
     if ext not in {item.lower() for item in cfg.extensions}:
         return TAG_FAILED
 
-    # force_retag=False 时保留已有标签：原实现对 FLAC 直接 delete()、对
-    # MP3/WAV 直接 clear()，等于把用户已有的标签和封面原地清空且不可恢复。
-    if not cfg.force_retag and _has_existing_tags(path, ext):
-        if log:
-            log(f'已有标签，按 force_retag=false 保留原样："{os.path.normpath(path)}"')
-        return TAG_SKIPPED
-
     track_title = os.path.splitext(os.path.basename(path))[0]
     values = build_tag_values(metadata, track_title, cfg)
+    cover = cover_bytes if cfg.embed_cover else None
+
+    # force_retag=False 时，已有标签只有在本程序负责的字段均正确时才跳过；
+    # 缺失或错误的标签仍需重写，不能仅凭“存在标签”就保留错误内容。
+    if not cfg.force_retag and _has_existing_tags(path, ext):
+        if _existing_tags_are_correct(path, ext, values, cover):
+            if log:
+                log(f'已有标签且内容正确，已跳过写入："{os.path.normpath(path)}"')
+            return TAG_SKIPPED
+        if log:
+            log(f'已有标签但内容不正确，将重新写入："{os.path.normpath(path)}"')
 
     try:
-        cover = cover_bytes if cfg.embed_cover else None
         if ext == '.flac':
             _apply_flac_tags(path, values, cover)
         elif ext in ('.mp3', '.wav', '.wave'):
@@ -419,7 +511,7 @@ def tag_work_folder(
 
     if skipped and safe_log:
         safe_log(
-            '{} 个文件已有标签，按 force_retag=false 保留原样（如需覆盖请开启 force_retag）'.format(
+            '{} 个文件已有标签且内容正确，已跳过重复写入'.format(
                 skipped)
         )
     return ok + skipped, len(files)

@@ -981,6 +981,13 @@ class Unzipper():
             for password in password_candidates:
                 returncode, msg = self._run_single_unzip(zip, output_path, password)
                 if returncode == 0:
+                    if zip.covered and self._extract_is_wrong_password_garbage(output_path):
+                        self.logger.warning(
+                            '隐写载体解压结果仅包含编号/zst 碎片，已拒绝假成功：{}'.format(
+                                os.path.normpath(zip.path),
+                            )
+                        )
+                        return False
                     zip.pw_list = [password]
                     zip.mark_namelist_scanned(password)
                     self._emit_unzip_progress(1, 1)

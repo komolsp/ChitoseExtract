@@ -1,8 +1,7 @@
-"""标签写入的「不可逆损失」防护测试。
+"""已有标签的核对、跳过与重写测试。
 
-覆盖 review 发现的 C8：force_retag 此前是死配置，无论其值如何都会
-对 FLAC 调 delete()、对 MP3/WAV 调 clear()，把用户已有标签与内嵌封面
-原地清空且不可恢复。
+force_retag=false 时不能仅凭标签存在就跳过：本程序负责的字段正确才跳过，
+字段缺失或内容错误时仍需重写。
 
 这里用 stub 注入 mutagen，以便在未安装 mutagen 的环境下也能验证判定逻辑；
 关键是 stub 必须忠实模拟真实 mutagen 的 FLAC 语义：__len__ 返回元数据块
@@ -209,16 +208,30 @@ class TestTagPreservation(unittest.TestCase):
             handle.write(b'audio')
         return path
 
-    def test_existing_tags_preserved_when_force_retag_off(self):
-        """已有标签 + force_retag=false：必须跳过，不得清空后重写。"""
+    def test_incorrect_existing_tags_are_rewritten_when_force_retag_off(self):
+        """已有标签并不代表正确；内容不符时必须重写。"""
         for ext in ('.flac', '.mp3', '.wav'):
             with self.subTest(ext=ext):
                 _FakeAudio.saved_paths = []
                 path = self._make(f'tagged{ext}')
                 status = self.tagger._tag_file_status(path, METADATA, CONFIG)
-                self.assertEqual(status, self.tagger.TAG_SKIPPED)
-                # 未调用 save() 即证明未发生原地重写（原实现会 delete()/clear() 后 save）。
-                self.assertEqual(_FakeAudio.saved_paths, [], '不应写入')
+                self.assertEqual(status, self.tagger.TAG_WRITTEN)
+                self.assertEqual(_FakeAudio.saved_paths, [path])
+
+    def test_correct_existing_tags_are_skipped_when_force_retag_off(self):
+        """核对确认正确的已有标签才允许跳过。"""
+        original = self.tagger._existing_tags_are_correct
+        self.tagger._existing_tags_are_correct = lambda *args: True
+        try:
+            for ext in ('.flac', '.mp3', '.wav'):
+                with self.subTest(ext=ext):
+                    _FakeAudio.saved_paths = []
+                    path = self._make(f'tagged{ext}')
+                    status = self.tagger._tag_file_status(path, METADATA, CONFIG)
+                    self.assertEqual(status, self.tagger.TAG_SKIPPED)
+                    self.assertEqual(_FakeAudio.saved_paths, [], '不应重复写入')
+        finally:
+            self.tagger._existing_tags_are_correct = original
 
     def test_existing_tags_overwritten_when_force_retag_on(self):
         """force_retag=true 时应覆盖写入（该配置此前完全无效）。"""
@@ -238,11 +251,51 @@ class TestTagPreservation(unittest.TestCase):
                 status = self.tagger._tag_file_status(path, METADATA, CONFIG)
                 self.assertEqual(status, self.tagger.TAG_WRITTEN)
 
-    def test_flac_with_only_picture_is_preserved(self):
-        """仅有内嵌封面、无文本标签的 FLAC 也应视为已有内容而保留。"""
+    def test_flac_with_only_picture_is_rewritten(self):
+        """仅有封面但缺少文本标签，不应被误判成标签正确。"""
         path = self._make('pictured.flac')
         status = self.tagger._tag_file_status(path, METADATA, CONFIG)
-        self.assertEqual(status, self.tagger.TAG_SKIPPED)
+        self.assertEqual(status, self.tagger.TAG_WRITTEN)
+
+    def test_flac_match_checks_managed_fields_and_cover(self):
+        values = self.tagger.build_tag_values(METADATA, 'track', self.tagger.TagConfig())
+        fields = {
+            'title': 'title', 'album': 'album', 'artist': 'artist',
+            'albumartist': 'albumartist', 'date': 'date', 'year': 'year',
+            'genre': 'genre', 'series': 'series', 'comment': 'rjcode',
+            'keywords': 'tags',
+        }
+        audio = types.SimpleNamespace(
+            tags={key: [values[value_key]] for key, value_key in fields.items()
+                  if values[value_key]},
+            pictures=[types.SimpleNamespace(type=3, data=b'cover')],
+        )
+        audio.tags['custom'] = ['应被忽略的第三方标签']
+        self.assertTrue(self.tagger._flac_tags_match(audio, values, b'cover'))
+        audio.tags['album'] = ['错误专辑']
+        self.assertFalse(self.tagger._flac_tags_match(audio, values, b'cover'))
+
+    def test_id3_match_checks_managed_fields_and_cover(self):
+        values = self.tagger.build_tag_values(METADATA, 'track', self.tagger.TagConfig())
+
+        class Tags(dict):
+            def getall(self, key):
+                return self.get(key, [])
+
+        fields = {
+            'TIT2': 'title', 'TALB': 'album', 'TPE1': 'artist',
+            'TPE2': 'albumartist', 'TDRC': 'year', 'TCON': 'genre',
+            'TXXX:Series': 'series', 'TXXX:RJcode': 'rjcode',
+        }
+        tags = Tags({
+            key: types.SimpleNamespace(text=[values[value_key]])
+            for key, value_key in fields.items() if values[value_key]
+        })
+        tags['APIC'] = [types.SimpleNamespace(type=3, data=b'cover')]
+        audio = types.SimpleNamespace(tags=tags)
+        self.assertTrue(self.tagger._id3_tags_match(audio, values, b'cover'))
+        tags['TXXX:RJcode'].text = ['RJ000000']
+        self.assertFalse(self.tagger._id3_tags_match(audio, values, b'cover'))
 
     def test_flac_len_is_not_used_as_tag_indicator(self):
         """回归：len(FLAC) 含 STREAMINFO，恒 >= 1，不得据此判定「已有标签」。
@@ -273,7 +326,7 @@ class TestTagPreservation(unittest.TestCase):
         """tag_file 必须保持布尔返回（向后兼容既有调用方与测试）。"""
         tagged = self._make('tagged.flac')
         fresh = self._make('fresh.flac')
-        self.assertFalse(self.tagger.tag_file(tagged, METADATA, CONFIG))
+        self.assertTrue(self.tagger.tag_file(tagged, METADATA, CONFIG))
         self.assertTrue(self.tagger.tag_file(fresh, METADATA, CONFIG))
 
     def test_skipped_files_do_not_fail_work_folder(self):
@@ -284,9 +337,14 @@ class TestTagPreservation(unittest.TestCase):
             with open(os.path.join(folder, name), 'wb') as handle:
                 handle.write(b'audio')
 
-        ok, total = self.tagger.tag_work_folder(folder, METADATA, CONFIG)
-        self.assertEqual(total, 3)
-        self.assertEqual(ok, total, '跳过应计为成功，否则步骤被误判失败')
+        original = self.tagger._existing_tags_are_correct
+        self.tagger._existing_tags_are_correct = lambda *args: True
+        try:
+            ok, total = self.tagger.tag_work_folder(folder, METADATA, CONFIG)
+            self.assertEqual(total, 3)
+            self.assertEqual(ok, total, '跳过应计为成功，否则步骤被误判失败')
+        finally:
+            self.tagger._existing_tags_are_correct = original
 
     def test_missing_file_and_wrong_extension_fail(self):
         self.assertEqual(

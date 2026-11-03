@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(ROOT, 'dist')
@@ -203,17 +204,43 @@ def verify_build_output(exe_path: str) -> None:
     """运行冻结程序的无 GUI 自检，避免发布只能生成、不能启动的 exe。"""
     if not os.path.isfile(exe_path):
         raise SystemExit(f'打包失败，未生成：{exe_path}')
-    completed = subprocess.run(
-        [exe_path, '--build-smoke-test'],
-        cwd=DIST,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    config_path = os.path.join(DIST, 'config.yaml')
+    try:
+        with open(config_path, 'rb') as handle:
+            release_config = handle.read()
+    except OSError as err:
+        raise SystemExit(f'打包后缺少配置模板：{config_path}') from err
+
+    # 发布模板故意保留空路径，直接启动自检会被正式配置校验拒绝。自检期间
+    # 临时换成隔离目录，结束后无条件恢复模板，避免把开发机路径写进发布包。
+    with tempfile.TemporaryDirectory(prefix='chitose-build-smoke-', dir=BUILD_DIR) as tmp:
+        output_path = os.path.join(tmp, 'output').replace('\\', '/')
+        recycle_path = os.path.join(tmp, 'recycle').replace('\\', '/')
+        smoke_config = (
+            'path:\n'
+            f'  output: "{output_path}"\n'
+            f'  recycle: "{recycle_path}"\n'
+        )
+        with open(config_path, 'w', encoding='utf-8') as handle:
+            handle.write(smoke_config)
+        try:
+            completed = subprocess.run(
+                [exe_path, '--build-smoke-test'],
+                cwd=DIST,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            with open(config_path, 'wb') as handle:
+                handle.write(release_config)
     # windowed exe 没有控制台，不能依赖 stdout；退出码 0 即代表自检通过。
     if completed.returncode != 0:
         detail = (completed.stdout + '\n' + completed.stderr).strip()
         raise SystemExit(f'打包后运行时自检失败（退出码 {completed.returncode}）：\n{detail}')
+    startup_log = os.path.join(DIST, 'startup_error.log')
+    if os.path.isfile(startup_log):
+        os.remove(startup_log)
 
 
 def main():
@@ -228,6 +255,11 @@ def main():
     args = parser.parse_args()
 
     verify_build_environment()
+
+    # PyInstaller --clean 只清理分析缓存，不会清空 dist/。发布前必须移除
+    # 上一次运行留下的日志、缓存数据库等文件，避免被误打进新版本。
+    if os.path.isdir(DIST):
+        shutil.rmtree(DIST)
 
     icon = os.path.join(ROOT, 'assets', 'icon.ico')
     if not os.path.isfile(icon):
@@ -283,9 +315,10 @@ def main():
     release_config = os.path.join(release_dir, 'config.yaml')
     release_config_template = (
         '# ChitoseExtract 默认配置（发布模板）\n'
-        '# path.output 为必填项：请改为本机音声库输出目录后再启动。\n'
+        '# path.output / path.recycle 为必填项，请改为本机目录后再启动。\n'
         'path:\n'
         "  output: ''\n"
+        "  recycle: ''\n"
     )
     with open(release_config, 'w', encoding='utf-8') as handle:
         handle.write(release_config_template)

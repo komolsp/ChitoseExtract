@@ -331,7 +331,11 @@ def _region_has_strong_archive_magic(
     start: int,
     limit: int,
 ) -> bool:
-    """在指定区间内搜索强压缩魔数（排除 moov 内 gzip 等弱特征误判）。"""
+    """在指定区间内搜索并校验强压缩包头。
+
+    视频码流中可能自然出现 PK/Rar 等短字节串；只匹配魔数会把正常媒体
+    当成隐写载体。这里与通用内嵌扫描保持一致，必须同时通过格式头校验。
+    """
     try:
         file_size = os.path.getsize(file_path)
     except OSError:
@@ -353,8 +357,18 @@ def _region_has_strong_archive_magic(
                     break
                 window = previous_tail + chunk
                 for sig in _STRONG_ARCHIVE_SIGNATURES:
-                    if window.find(sig) >= 0:
-                        return True
+                    search_from = 0
+                    while True:
+                        pos = window.find(sig, search_from)
+                        if pos == -1:
+                            break
+                        absolute = f.tell() - len(chunk) - len(previous_tail) + pos
+                        if (
+                            absolute > 0
+                            and _is_plausible_embedded_archive_header(file_path, absolute)
+                        ):
+                            return True
+                        search_from = pos + 1
                 previous_tail = window[-overlap:] if overlap else b''
     except OSError:
         return False
@@ -380,12 +394,28 @@ def _mp4_mdat_looks_like_video_bitstream(file_path: str, mdat_offset: int) -> bo
         return True
     if len(head) >= 6 and head[2:3] == b'\x00' and b'Lav' in head:
         return True
-    # MP4 avc1：mdat 常见 4 字节 NAL 长度前缀 + NAL 头（如 000002b10605...）
-    nlen = int.from_bytes(head[0:4], 'big')
-    if 1 <= nlen <= 4 * 1024 * 1024 and len(head) >= nlen + 4:
-        nal_type = head[4] & 0x1F
-        if nal_type in (1, 2, 3, 4, 5, 6, 7, 8, 9):
-            return True
+    def has_h264_nal(length_offset: int, header_offset: int, max_length: int) -> bool:
+        if header_offset >= len(head) or length_offset + 4 > len(head):
+            return False
+        nlen = int.from_bytes(head[length_offset:length_offset + 4], 'big')
+        if not 1 <= nlen <= max_length:
+            return False
+        nal_type = head[header_offset] & 0x1F
+        return nal_type in (1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+    # MP4 avc1：常见布局为「NAL 长度 + NAL 头」。这里只需验证长度范围和
+    # NAL 头，不要求 256 字节探针完整包含整个 NAL（真实关键帧通常远大于它）。
+    if has_h264_nal(0, 4, 64 * 1024 * 1024):
+        return True
+
+    # 部分 QuickTime/MOV 的 mdat 开头先有一层样本长度，样本内部才是
+    # 「NAL 长度 + NAL 头」；a8d78b4f_kr1.mov 即采用这种布局。
+    sample_length = int.from_bytes(head[0:4], 'big')
+    if (
+        8 <= sample_length <= 256 * 1024 * 1024
+        and has_h264_nal(4, 8, sample_length - 4)
+    ):
+        return True
     return False
 
 

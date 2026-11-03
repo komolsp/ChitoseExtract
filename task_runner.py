@@ -3289,6 +3289,22 @@ def create_timeline(files):
     return added
 
 
+def _recycle_directory(file_path: str) -> str:
+    """沿作品相对路径建立回收目录，避开已经回收的同名文件。"""
+    dest = conf.recycle_path
+    os.makedirs(dest, exist_ok=True)
+    if file_ops.is_path_under(conf.output_path, file_path):
+        rel_dir = os.path.dirname(os.path.relpath(file_path, conf.output_path))
+        if rel_dir and rel_dir != '.':
+            for name in rel_dir.split(os.sep):
+                child = os.path.join(dest, name)
+                while file_ops.path_exists(child) and not file_ops.is_dir_path(child):
+                    child += '(1)'
+                os.makedirs(child, exist_ok=True)
+                dest = child
+    return dest
+
+
 def delete_file(file_path) -> bool:  # 删除方法，若配置逻辑删除则丢进回收文件夹
     if not file_path or not os.path.exists(file_path):
         return True
@@ -3296,14 +3312,7 @@ def delete_file(file_path) -> bool:  # 删除方法，若配置逻辑删除则�
     try:
         file_ops.clear_shell_folder_attributes(file_path)
         if conf.logical_deletion:
-            mk_if_not_exit(conf.recycle_path)
-            dest = conf.recycle_path
-            if file_ops.is_path_under(conf.output_path, file_path):
-                rel_path = os.path.relpath(file_path, conf.output_path)
-                rel_dir = os.path.dirname(rel_path)
-                if rel_dir and rel_dir != '.':
-                    dest = os.path.join(conf.recycle_path, rel_dir)
-                    mk_if_not_exit(dest)
+            dest = _recycle_directory(file_path)
             dest_item = os.path.join(dest, os.path.basename(file_path.rstrip('\\')))
             if os.path.isdir(file_path):
                 while os.path.exists(dest_item):
@@ -3323,10 +3332,9 @@ def delete_file(file_path) -> bool:  # 删除方法，若配置逻辑删除则�
                 shutil.rmtree(file_path, onerror=_rmtree_onerror)
             else:
                 os.remove(file_path)
-    except FileNotFoundError:
-        # 父目录已整体移走时，子路径再删会找不到源，属预期，不记失败
-        return not os.path.exists(file_path)
     except (shutil.Error, OSError) as err:
+        # 只在源确已移走时忽略找不到路径的异常。目标父目录不存在等
+        # FileNotFoundError 也必须记录，否则只剩没有原因的过滤失败提示。
         if not os.path.exists(file_path):
             return True
         if logger:

@@ -145,6 +145,7 @@ class Filter():
                                    base: str | None = None) -> bool:
         parent = os.path.dirname(dir_path)
         hit = False
+        failed: list[str] = []
         for root, dirs, files in os.walk(dir_path, topdown=False):
             for file_name in files:
                 file_path = os.path.join(root, file_name)
@@ -157,6 +158,8 @@ class Filter():
                 if self._matches_file(file_path, base):
                     if self._try_delete_path(file_path):
                         self.logger.info('过滤文件: [ {} ] 命中关键词： [ {} ]'.format(file_path, matched))
+                    else:
+                        failed.append(file_path)
                     hit = True
                 else:
                     self._move_to_parent(file_path, parent)
@@ -170,7 +173,15 @@ class Filter():
         if file_ops.is_dir_path(dir_path):
             if self._try_delete_path(dir_path):
                 self.logger.info('过滤文件夹: [ {} ] 命中关键词： [ {} ]'.format(dir_path, matched))
+            else:
+                failed.append(dir_path)
             hit = True
+        # 文件单独处理失败后，整夹移入回收站仍可能成功；只上报最终残留。
+        failed = [target for target in failed if file_ops.path_exists(target)]
+        if failed:
+            raise FilterDeleteError(
+                '过滤有 {} 个目标未能删除：{}'.format(
+                    len(failed), ' | '.join(os.path.normpath(target) for target in failed[:10])))
         return hit
 
     def pre_filter(self, file_list: list):
