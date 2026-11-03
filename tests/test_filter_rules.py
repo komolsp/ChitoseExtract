@@ -3,7 +3,7 @@
 import re
 import unittest
 
-from filter_rules import DEFAULT_FILTER_RULES, build_filter_keywords
+from filter_rules import DEFAULT_FILTER_RULES, build_filter_keywords, resolve_filter_rules
 
 
 def _matches_any(path: str, keywords: list[str]) -> bool:
@@ -60,6 +60,17 @@ class TestNoSeFilterRules(unittest.TestCase):
     def test_chinese_sfx_jianxiao_variant(self):
         path = r'D:\work\title\效果音削減版'
         self.assertTrue(_matches_any(path, self.keywords))
+
+
+class TestFilterRuleDefaults(unittest.TestCase):
+    def test_missing_or_empty_filter_section_uses_defaults(self):
+        self.assertEqual(resolve_filter_rules(None), DEFAULT_FILTER_RULES)
+        self.assertEqual(resolve_filter_rules({}), DEFAULT_FILTER_RULES)
+
+    def test_explicit_empty_legacy_keyword_list_disables_rules(self):
+        resolved = resolve_filter_rules({'keyword': []})
+        self.assertTrue(resolved)
+        self.assertFalse(any(resolved.values()))
 
 
 class TestMp3LosslessGuard(unittest.TestCase):

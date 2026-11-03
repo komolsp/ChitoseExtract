@@ -306,6 +306,11 @@ def resolve_filter_rules(filter_section: dict | None) -> dict[str, bool]:
                 rules[rule_id] = bool(raw_rules[rule_id])
         return rules
 
+    # filter 段缺失或为空时应使用内置默认值。只有明确写出旧版 keyword
+    # 列表（包括 keyword: []）时，才按旧配置逐项推导开关。
+    if 'keyword' not in filter_section:
+        return rules
+
     keywords = filter_section.get('keyword') or []
     if not isinstance(keywords, list):
         return rules
