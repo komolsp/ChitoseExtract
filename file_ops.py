@@ -1562,6 +1562,68 @@ def is_cross_drive_path(src: str, dest: str) -> bool:
     )
 
 
+def _recover_completed_directory_move(src: str, dest: str, err: Exception) -> bool:
+    """识别 shutil.move 已复制完成、仅删除源空目录失败的跨盘移动。"""
+    if not is_dir_path(src) or not is_dir_path(dest):
+        return False
+
+    failed_path = getattr(err, 'filename', None)
+    if not failed_path:
+        return False
+    try:
+        src_norm = os.path.normcase(os.path.abspath(src))
+        failed_norm = os.path.normcase(os.path.abspath(failed_path))
+        if os.path.commonpath((src_norm, failed_norm)) != src_norm:
+            return False
+    except (OSError, ValueError, TypeError):
+        return False
+
+    def _raise_walk_error(walk_err):
+        raise walk_err
+
+    try:
+        for root, dirs, files in os.walk(src, onerror=_raise_walk_error):
+            if files:
+                return False
+            for name in dirs:
+                child = os.path.join(root, name)
+                if os.path.islink(child):
+                    return False
+                isjunction = getattr(os.path, 'isjunction', None)
+                if isjunction and isjunction(child):
+                    return False
+    except OSError:
+        return False
+
+    # shutil.move 跨盘时先完整 copytree，再 rmtree。源中只剩普通空目录，
+    # 说明数据已全部进入目标；常见失败原因是文件夹的 ReadOnly 属性。
+    clear_shell_folder_attributes(src)
+    try:
+        shutil.rmtree(src)
+    except OSError as cleanup_err:
+        logger.warning(
+            '目标复制已完成，源仅剩空目录但清理失败，按移动成功处理 '
+            '[{}] -> [{}]: {}'.format(src, dest, cleanup_err)
+        )
+    else:
+        logger.warning(
+            '目标复制已完成，已清理只读源空目录并按移动成功处理 '
+            '[{}] -> [{}]: {}'.format(src, dest, err)
+        )
+    return True
+
+
+def move_path(src: str, dest: str) -> str:
+    """移动到尚不存在的目标；修复跨盘复制完成后的只读目录清理误报。"""
+    try:
+        shutil.move(src, dest)
+    except Exception as err:
+        if _recover_completed_directory_move(src, dest, err):
+            return dest
+        raise
+    return dest
+
+
 def move_into_directory(src: str, dest_dir: str) -> str | None:
     """将文件或文件夹移入目标目录；重名时自动追加 (1)。"""
     if not src or not dest_dir or not path_exists(src):
@@ -1588,8 +1650,7 @@ def move_into_directory(src: str, dest_dir: str) -> str | None:
     # 同盘 rename/MoveFile 无法跨盘移动（资源库常在另一分区），
     # 回退到 shutil.move 走“复制+删除”，实现跨盘搬运。
     try:
-        shutil.move(src, dest)
-        return dest
+        return move_path(src, dest)
     except Exception as err:
         logger.error('跨盘移动失败 [{}] -> [{}]: {}'.format(src, dest, err))
     return None

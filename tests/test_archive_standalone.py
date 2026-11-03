@@ -1,6 +1,7 @@
 """单独执行归档步骤时应能处理音声库外的就地作品目录。"""
 
 import os
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -147,6 +148,55 @@ class TestArchiveStandalone(unittest.TestCase):
         self.assertEqual(os.path.normcase(result), os.path.normcase(expected))
         rename_path.assert_not_called()
         fallback_move.assert_called_once_with(src, expected)
+
+    def test_cross_drive_move_recovers_after_copy_when_only_readonly_empty_dirs_remain(self):
+        src_parent = os.path.join(self.tmp, 'cross_drive_source')
+        src = os.path.join(src_parent, '作品_pk')
+        child = os.path.join(src, 'readonly_child')
+        dest_dir = os.path.join(self.tmp, 'cross_drive_dest')
+        os.makedirs(child)
+        payload = os.path.join(child, 'cover.png')
+        with open(payload, 'wb') as stream:
+            stream.write(b'copied payload')
+
+        real_copytree = shutil.copytree
+
+        def copy_then_fail_source_cleanup(move_src, move_dest):
+            real_copytree(move_src, move_dest)
+            os.remove(payload)
+            raise PermissionError(13, 'Access denied', child)
+
+        with patch.object(
+            task_runner.file_ops, 'is_cross_drive_path', return_value=True,
+        ), patch.object(
+            task_runner.file_ops.shutil, 'move', side_effect=copy_then_fail_source_cleanup,
+        ):
+            result = task_runner.file_ops.move_into_directory(src, dest_dir)
+
+        expected = os.path.join(dest_dir, os.path.basename(src))
+        self.assertEqual(result, expected)
+        self.assertFalse(os.path.exists(src))
+        with open(os.path.join(expected, 'readonly_child', 'cover.png'), 'rb') as stream:
+            self.assertEqual(stream.read(), b'copied payload')
+
+    def test_cross_drive_move_does_not_hide_copy_failure_with_source_files_remaining(self):
+        src = os.path.join(self.tmp, 'incomplete_source')
+        dest_dir = os.path.join(self.tmp, 'incomplete_dest')
+        os.makedirs(src)
+        payload = os.path.join(src, 'not_copied.bin')
+        with open(payload, 'wb') as stream:
+            stream.write(b'not copied')
+
+        with patch.object(
+            task_runner.file_ops, 'is_cross_drive_path', return_value=True,
+        ), patch.object(
+            task_runner.file_ops.shutil, 'move',
+            side_effect=PermissionError(13, 'Access denied', payload),
+        ):
+            result = task_runner.file_ops.move_into_directory(src, dest_dir)
+
+        self.assertIsNone(result)
+        self.assertTrue(os.path.isfile(payload))
 
 
 if __name__ == '__main__':

@@ -2478,9 +2478,8 @@ def _move_into_library(work_path: str, dest_dir: str) -> str | None:
     ):
         return dest
     try:
-        shutil.move(work_path, dest)
-        return dest
-    except OSError as err:
+        return file_ops.move_path(work_path, dest)
+    except (OSError, shutil.Error) as err:
         if logger:
             logger.error('移入目标库失败 [{}] -> [{}]: {}'.format(work_path, dest, err))
         return None
